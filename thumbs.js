@@ -2,6 +2,7 @@ const B2 = require('backblaze-b2');
 const fs = require('fs');
 const readline = require('readline');
 const path = require('path');
+const sharp = require('sharp');
 
 require('dotenv').config()
 
@@ -36,14 +37,15 @@ async function run() {
     rl.on('line', onLineRead);
 
     rl.on('close', () => {
-        console.log('Finished reading index.');
-        console.log('Success!');
+        //console.log('Finished reading index.');
+        //console.log('Success!');
     });
 }
 
 async function onLineRead(line) {
     const jsonLine = JSON.parse(line);
     var extension = path.extname(jsonLine.filename);
+    extension = extension.toLowerCase();
 
     if (!isImage.includes(extension) && !isVideo.includes(extension)) {
         console.log('skipped ' + jsonLine.filename);
@@ -53,13 +55,27 @@ async function onLineRead(line) {
     try {
         let b2_response = await b2.downloadFileById({
             fileId: jsonLine.fileId,
-            responseType: 'arraybuffer'
+            responseType: 'arraybuffer',
+            onDownloadProgress: (event) => { console.log(event) }
         });
 
         const filePath = tmpFolderPath + jsonLine.filename;
+        console.log('processing file ' + jsonLine.filename);
 
-        fs.writeFileSync(filePath, Buffer.from(b2_response.data));
-        console.log('downloading ' + jsonLine.filename);
+        // scale down image
+        if (isImage.includes(extension)) {
+            const percentage = 5;
+            sharp(b2_response.data).metadata()
+                .then(info => {
+                    const width = Math.round(info.width * percentage / 100);
+                    const height = Math.round(info.height * percentage / 100);
+                    return sharp(b2_response.data).resize(width, height).toBuffer();
+                })
+                .then(output => {
+                    fs.writeFileSync(filePath, output);
+                });
+        }
+
     } catch (err) {
         console.log(err);
     }
