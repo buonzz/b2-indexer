@@ -9,7 +9,7 @@ const b2 = new B2({
     applicationKey: process.env.APPLICATION_KEY // or masterApplicationKey
 });
 
-const filePath = path.join(__dirname, 'dist/output.jsonl');
+const filePath = path.join(__dirname, 'dist/' + process.env.BUCKET_ID + '-index.jsonl');
 
 
 async function run() {
@@ -40,6 +40,7 @@ async function run() {
             break;
         }
         console.log('page: ' + ctr);
+        console.log('files indexed: ' + ctr * 1000);
         ctr++;
     }
 
