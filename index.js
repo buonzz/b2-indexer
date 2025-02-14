@@ -1,5 +1,6 @@
 const B2 = require('backblaze-b2');
 const fs = require('fs');
+const path = require('path');
 
 require('dotenv').config()
 
@@ -7,6 +8,8 @@ const b2 = new B2({
     applicationKeyId: process.env.APPLICATION_KEY_ID, // or accountId: 'accountId'
     applicationKey: process.env.APPLICATION_KEY // or masterApplicationKey
 });
+
+const filePath = path.join(__dirname, 'dist/output.jsonl');
 
 
 async function run() {
@@ -37,8 +40,12 @@ async function run() {
         }
     });
 
+    const stream = fs.createWriteStream(filePath, { flags: 'w' });
+    for (i = 0; i < data.length; i++) {
+        stream.write(JSON.stringify(data[i]) + "\n");
+    }
+    stream.end();
 
-    fs.writeFileSync('dist/output.json', JSON.stringify(data));
     console.log('Success!');
 }
 
