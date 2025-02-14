@@ -1,5 +1,5 @@
 const B2 = require('backblaze-b2');
-
+const fs = require('fs');
 
 require('dotenv').config()
 
@@ -38,8 +38,8 @@ async function run() {
     });
 
 
-
-    console.log(data);
+    fs.writeFileSync('dist/output.json', JSON.stringify(data));
+    console.log('Success!');
 }
 
 run();
