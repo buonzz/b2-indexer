@@ -11,6 +11,7 @@ const b2 = new B2({
 });
 
 const folderPath = path.join(__dirname, 'dist/thumbs/' + process.env.BUCKET_ID + '/');
+const tmpFolderPath = path.join(__dirname, 'tmp/' + process.env.BUCKET_ID + '/');
 const indexPath = path.join(__dirname, 'dist/' + process.env.BUCKET_ID + '-index.jsonl');
 
 
@@ -37,8 +38,18 @@ async function run() {
     });
 }
 
-function onLineRead(line) {
+async function onLineRead(line) {
     const jsonLine = JSON.parse(line);
+
+    let b2_response = await b2.downloadFileById({
+        fileId: jsonLine.file_id,
+        responseType: 'arraybuffer'
+    });
+
+    const filePath = tmpFolderPath + jsonLine.filename;
+
+    fs.writeFileSync(filePath, Buffer.from(myArrayBuffer));
+
     console.log(jsonLine);
 }
 
