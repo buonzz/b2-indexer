@@ -13,6 +13,9 @@ const filePath = path.join(__dirname, 'dist/output.jsonl');
 
 
 async function run() {
+
+    const stream = fs.createWriteStream(filePath, { flags: 'w' });
+
     try {
         await b2.authorize();
     } catch (err) {
@@ -23,12 +26,31 @@ async function run() {
         bucketId: process.env.BUCKET_ID,
         delimiter: ''
     }
+    listFilesParams.maxFileCount = 1000;
+    var startFileName = null;
+    var ctr = 1;
+    while (true) {
+        if (startFileName != null) {
+            listFilesParams.startFileName = startFileName;
+        }
 
-    listFilesParams.maxFileCount = 100;
+        startFileName = await processPage(b2, stream, listFilesParams);
+        //console.log('startFileName=' + startFileName);
+        if (startFileName == null) {
+            break;
+        }
+        console.log('page: ' + ctr);
+        ctr++;
+    }
 
-    const filenames = await b2.listFileNames(listFilesParams);
 
+    stream.end();
 
+    console.log('Success!');
+}
+
+async function processPage(b2, stream, params) {
+    const filenames = await b2.listFileNames(params);
     let data = filenames.data.files.map(function (cur) {
         return {
             filename: cur.fileName,
@@ -40,13 +62,13 @@ async function run() {
         }
     });
 
-    const stream = fs.createWriteStream(filePath, { flags: 'w' });
+
     for (i = 0; i < data.length; i++) {
         stream.write(JSON.stringify(data[i]) + "\n");
+        console.log('indexed ' + data[i].filename);
     }
-    stream.end();
 
-    console.log('Success!');
+    return filenames.data.nextFileName;
 }
 
 run();
