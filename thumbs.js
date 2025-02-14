@@ -11,8 +11,11 @@ const b2 = new B2({
 });
 
 const folderPath = path.join(__dirname, 'dist/thumbs/' + process.env.BUCKET_ID + '/');
-const tmpFolderPath = path.join(__dirname, 'tmp/' + process.env.BUCKET_ID + '/');
+const tmpFolderPath = path.join(__dirname, 'tmp/');
 const indexPath = path.join(__dirname, 'dist/' + process.env.BUCKET_ID + '-index.jsonl');
+
+const isImage = ['.jpg', '.jpeg', '.png']; //you can add more
+const isVideo = ['.mov', '.mp4']; // you can add more extension
 
 
 async function run() {
@@ -40,17 +43,26 @@ async function run() {
 
 async function onLineRead(line) {
     const jsonLine = JSON.parse(line);
+    var extension = path.extname(jsonLine.filename);
 
-    let b2_response = await b2.downloadFileById({
-        fileId: jsonLine.file_id,
-        responseType: 'arraybuffer'
-    });
+    if (!isImage.includes(extension) && !isVideo.includes(extension)) {
+        console.log('skipped ' + jsonLine.filename);
+        return;
+    }
 
-    const filePath = tmpFolderPath + jsonLine.filename;
+    try {
+        let b2_response = await b2.downloadFileById({
+            fileId: jsonLine.fileId,
+            responseType: 'arraybuffer'
+        });
 
-    fs.writeFileSync(filePath, Buffer.from(myArrayBuffer));
+        const filePath = tmpFolderPath + jsonLine.filename;
 
-    console.log(jsonLine);
+        fs.writeFileSync(filePath, Buffer.from(b2_response.data));
+        console.log('downloading ' + jsonLine.filename);
+    } catch (err) {
+        console.log(err);
+    }
 }
 
 
