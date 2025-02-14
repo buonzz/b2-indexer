@@ -47,6 +47,7 @@ async function run() {
 
     stream.end();
 
+    console.log('Estimated files indexed: ' + ctr * 1000);
     console.log('Success!');
 }
 
