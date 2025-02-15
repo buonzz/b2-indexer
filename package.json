@@ -6,7 +6,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "index": "node index.js",
-    "thumbs": "node thumbs.js"
+    "thumbs": "node thumbs.js",
+    "website": "node website.js"
   },
   "author": "",
   "license": "ISC",
