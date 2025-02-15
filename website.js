@@ -1,8 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const IMAGES_FOLDER = './images'; // Folder containing images
-const OUTPUT_FOLDER = './output'; // Folder to store generated HTML files
+const IMAGES_FOLDER = path.join(__dirname, 'dist/thumbs/'); // Folder containing images
+const OUTPUT_FOLDER = path.join(__dirname, 'dist/'); // Folder to store generated HTML files
 const IMAGES_PER_PAGE = 50;
 
 // Ensure output folder exists
@@ -29,8 +29,8 @@ function generateHTMLPage(imagesSubset, pageIndex) {
     <title>Image Gallery - Page ${pageIndex}</title>
     <style>
         body { font-family: Arial, sans-serif; text-align: center; }
-        .gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 20px; }
-        .gallery img { width: 100%; height: auto; border-radius: 5px; }
+        .gallery { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; padding: 5px; }
+        .gallery img { width: 20%; height: auto; border-radius: 5px; }
         .pagination { margin-top: 20px; }
         .pagination a { margin: 0 10px; text-decoration: none; color: blue; }
     </style>
@@ -38,7 +38,7 @@ function generateHTMLPage(imagesSubset, pageIndex) {
 <body>
     <h1>Image Gallery - Page ${pageIndex}</h1>
     <div class="gallery">
-        ${imagesSubset.map(img => `<img src="../images/${img}" alt="Image">`).join('\n')}
+        ${imagesSubset.map(img => `<img src="thumbs/${img}" alt="Image">`).join('\n')}
     </div>
     <div class="pagination">
         ${prevPage ? `<a href="${prevPage}">&laquo; Previous</a>` : ''}
@@ -47,7 +47,12 @@ function generateHTMLPage(imagesSubset, pageIndex) {
 </body>
 </html>`;
 
-    fs.writeFileSync(path.join(OUTPUT_FOLDER, `page${pageIndex}.html`), htmlContent);
+    if (pageIndex == 1) {
+        fs.writeFileSync(path.join(OUTPUT_FOLDER, `page${pageIndex}.html`), htmlContent);
+        fs.writeFileSync(path.join(OUTPUT_FOLDER, `index.html`), htmlContent); // extra index file
+    }
+    else
+        fs.writeFileSync(path.join(OUTPUT_FOLDER, `page${pageIndex}.html`), htmlContent);
 }
 
 // Generate HTML pages

@@ -4,3 +4,4 @@ node_modules/
 /dist/*.jsonl
 /tmp/*.*
 /dist/thumbs/*.jpg
+/dist/*.html
