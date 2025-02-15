@@ -80,13 +80,20 @@ async function onLineRead(line, authorizationToken, apiUrl, bucketName) {
 }
 
 async function processImage(jsonLine) {
+
+    const filePath = folderPath + jsonLine.filename.replace(/\//g, '_');
+    const percentage = 5;
+
+
+    if (fs.existsSync(filePath)) {
+        console.log(filePath + ' already exists, skipped');
+        return;
+    }
+
     let b2_response = await b2.downloadFileById({
         fileId: jsonLine.fileId,
         responseType: 'arraybuffer'
     });
-
-    const filePath = folderPath + jsonLine.filename.replace(/\//g, '_');
-    const percentage = 5;
 
     try {
         const metadata = await sharp(b2_response.data).metadata();
@@ -101,9 +108,15 @@ async function processImage(jsonLine) {
 
 async function generateVideoThumbnail(jsonLine, authorizationToken, apiUrl, bucketName) {
     return new Promise((resolve, reject) => {
+
         const videoUrl = getFileUrl(jsonLine.filename, authorizationToken, apiUrl, bucketName);
         const outputThumbnail = folderPath + jsonLine.filename.replace(/\//g, '_') + '-thumb.jpg';
         const ffmpegCmd = `ffmpeg -i "${videoUrl}" -ss 00:00:05 -vframes 1 -q:v 2 -update 1 "${outputThumbnail}"`;
+
+        if (fs.existsSync(outputThumbnail)) {
+            console.log(outputThumbnail + ' already exists, skipped');
+            return reject(outputThumbnail + ' already exists, skipped');
+        }
 
         exec(ffmpegCmd, (error, stdout, stderr) => {
             if (error) {

@@ -26,24 +26,46 @@ function generateHTMLPage(imagesSubset, pageIndex) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Image Gallery - Page ${pageIndex}</title>
-    <style>
-        body { font-family: Arial, sans-serif; text-align: center; }
-        .gallery { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; padding: 5px; }
-        .gallery img { width: 100%; height: auto; border-radius: 5px; }
-        .pagination { margin-top: 20px; }
-        .pagination a { margin: 0 10px; text-decoration: none; color: blue; }
-    </style>
+    <title>B2 Indexer Gallery - Page ${pageIndex}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
 </head>
 <body>
-    <h1>Image Gallery - Page ${pageIndex}</h1>
-    <div class="gallery">
-        ${imagesSubset.map(img => `<img src="thumbs/${img}" alt="Image">`).join('\n')}
-    </div>
-    <div class="pagination">
-        ${prevPage ? `<a href="${prevPage}">&laquo; Previous</a>` : ''}
-        ${nextPage ? `<a href="${nextPage}">Next &raquo;</a>` : ''}
-    </div>
+    <div class="container">
+        <nav aria-label="Page navigation example">
+            <ul class="pagination">
+                ${prevPage ? `<li class="page-item"><a class="page-link" href="${prevPage}">&laquo; Previous</a><li>` : ''}
+                ${nextPage ? `<li class="page-item"><a  class="page-link" href="${nextPage}">Next &raquo;</a></li>` : ''}
+            </ul>
+        </nav>
+    </div><!-- container -->
+
+    <div class="container">
+        <div class="row" id="grid">
+            ${imagesSubset.map(img => `<div class="col-sm-6 col-lg-2 mt-2">
+                    <div class="card">
+                        <img src="thumbs/${img}" class="card-img-top"/>
+                         <div class="card-body">
+                                <h5 class="card-title">${img}</h5>
+                                <a href="#" class="btn btn-secondary btn-sm"><i class="bi bi-download"></i></a>
+                         </div><!-- card -->
+                    </div><!-- card -->
+                </div><!-- col -->`).join('\n')}
+          </div><!-- row -->
+    </div><!-- container -->
+    <script src="https://unpkg.com/masonry-layout@4/dist/masonry.pkgd.min.js"></script>
+    <script src="https://unpkg.com/imagesloaded@5/imagesloaded.pkgd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+    <script>
+        $(function(){
+            $('#grid').imagesLoaded( function() {
+                $('#grid').masonry({
+                    // options
+                    percentPosition: true,
+                    });
+                });
+            });
+    </script>
 </body>
 </html>`;
 
