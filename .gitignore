@@ -6,3 +6,4 @@ node_modules/
 /dist/thumbs/*.jpg
 /dist/thumbs/*.jpeg
 /dist/*.html
+/dist/*.json

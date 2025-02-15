@@ -7,7 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "index": "node index.js",
     "thumbs": "node thumbs.js",
-    "generate-site": "node generate_site.js"
+    "generate-site": "node generate_site.js",
+    "generate-links": "node download_links.js"
   },
   "author": "",
   "license": "ISC",
