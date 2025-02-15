@@ -37,4 +37,19 @@ BUCKET_ID=
 npm run index
 ```
 
-this generates files in the dist folder.
+this generates the JSON file in the dist folder.
+
+
+### Generate the thumbnails
+
+```
+npm run thumbs
+```
+
+this reads the JSONL file from previous step, then generate thumbnail for each.
+
+
+
+### Workflow
+
+Normally, you would run the indexer more often, then generate thumbnail once in a while.
