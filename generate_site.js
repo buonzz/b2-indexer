@@ -1,6 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 
+require('dotenv').config();
+
 const IMAGES_FOLDER = path.join(__dirname, 'dist/thumbs/'); // Folder containing images
 const OUTPUT_FOLDER = path.join(__dirname, 'dist/'); // Folder to store generated HTML files
 const IMAGES_PER_PAGE = 50;
@@ -53,10 +55,13 @@ function generateHTMLPage(imagesSubset, pageIndex) {
                 </div><!-- col -->`).join('\n')}
           </div><!-- row -->
     </div><!-- container -->
+    <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
     <script src="https://unpkg.com/masonry-layout@4/dist/masonry.pkgd.min.js"></script>
     <script src="https://unpkg.com/imagesloaded@5/imagesloaded.pkgd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
     <script>
+        var downloadLinks = null;
+
         $(function(){
             $('#grid').imagesLoaded( function() {
                 $('#grid').masonry({
@@ -64,6 +69,13 @@ function generateHTMLPage(imagesSubset, pageIndex) {
                     percentPosition: true,
                     });
                 });
+            });
+
+            $.getJSON("${process.env.BUCKET_ID}-download-links.json", function(data){
+                downloadLinks = data;
+                console.log(downloadLinks);
+            }).fail(function(){
+                console.log("An error has occurred.");
             });
     </script>
 </body>
