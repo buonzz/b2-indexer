@@ -50,6 +50,18 @@ this reads the JSONL file from previous step, then generate thumbnail for each.
 
 
 
+### Generate static website
+
+```
+npm run website
+```
+
+to open the site
+```
+http-server -o dist/
+```
+
+
 ### Workflow
 
 Normally, you would run the indexer more often, then generate thumbnail once in a while.

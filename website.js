@@ -30,7 +30,7 @@ function generateHTMLPage(imagesSubset, pageIndex) {
     <style>
         body { font-family: Arial, sans-serif; text-align: center; }
         .gallery { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; padding: 5px; }
-        .gallery img { width: 20%; height: auto; border-radius: 5px; }
+        .gallery img { width: 100%; height: auto; border-radius: 5px; }
         .pagination { margin-top: 20px; }
         .pagination a { margin: 0 10px; text-decoration: none; color: blue; }
     </style>
