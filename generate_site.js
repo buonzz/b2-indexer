@@ -33,13 +33,17 @@ function generateHTMLPage(imagesSubset, pageIndex) {
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
 </head>
 <body>
-    <div class="container">
-        <nav aria-label="Page navigation example">
-            <ul class="pagination">
-                ${prevPage ? `<li class="page-item"><a class="page-link" href="${prevPage}">&laquo; Previous</a><li>` : ''}
-                ${nextPage ? `<li class="page-item"><a  class="page-link" href="${nextPage}">Next &raquo;</a></li>` : ''}
-            </ul>
-        </nav>
+    <div class="container mt-2">
+        <div class="row">
+            <div class="col-md-12">
+                <nav class=" float-end" aria-label="Page navigation example">
+                    <ul class="pagination">
+                        ${prevPage ? `<li class="page-item"><a class="page-link" href="${prevPage}">&laquo; Previous</a><li>` : ''}
+                        ${nextPage ? `<li class="page-item"><a  class="page-link" href="${nextPage}">Next &raquo;</a></li>` : ''}
+                    </ul>
+                </nav>
+            </div>
+        </div>
     </div><!-- container -->
 
     <div class="container">
@@ -49,11 +53,24 @@ function generateHTMLPage(imagesSubset, pageIndex) {
                         <img src="thumbs/${img}" class="card-img-top"/>
                          <div class="card-body">
                                 <p>${start_and_end(img)}</p>
-                                <a href="#" class="btn btn-secondary btn-sm"><i class="bi bi-download"></i></a>
+                                <a href="#" class="download-btn" data-filename="${img}" class="btn btn-secondary btn-sm"><i class="bi bi-download"></i></a>
                          </div><!-- card -->
                     </div><!-- card -->
                 </div><!-- col -->`).join('\n')}
           </div><!-- row -->
+    </div><!-- container -->
+
+    <div class="container mt-2">
+        <div class="row">
+            <div class="col-md-12">
+                <nav class=" float-end" aria-label="Page navigation example">
+                    <ul class="pagination">
+                        ${prevPage ? `<li class="page-item"><a class="page-link" href="${prevPage}">&laquo; Previous</a><li>` : ''}
+                        ${nextPage ? `<li class="page-item"><a  class="page-link" href="${nextPage}">Next &raquo;</a></li>` : ''}
+                    </ul>
+                </nav>
+            </div>
+        </div>
     </div><!-- container -->
     <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
     <script src="https://unpkg.com/masonry-layout@4/dist/masonry.pkgd.min.js"></script>
@@ -61,23 +78,14 @@ function generateHTMLPage(imagesSubset, pageIndex) {
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
     <script>
         var downloadLinks = null;
-
-        $(function(){
-            $('#grid').imagesLoaded( function() {
-                $('#grid').masonry({
-                    // options
-                    percentPosition: true,
-                    });
-                });
-            });
-
-            $.getJSON("${process.env.BUCKET_ID}-download-links.json", function(data){
-                downloadLinks = data;
-                console.log(downloadLinks);
-            }).fail(function(){
-                console.log("An error has occurred.");
-            });
+        $.getJSON("${process.env.BUCKET_ID}-download-links.json", function(data){
+            downloadLinks = data;
+            //console.log(downloadLinks);
+        }).fail(function(){
+            console.log("An error has occurred.");
+        });
     </script>
+    <script src="app.js"></script>
 </body>
 </html>`;
 
