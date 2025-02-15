@@ -46,7 +46,7 @@ function generateHTMLPage(imagesSubset, pageIndex) {
                     <div class="card">
                         <img src="thumbs/${img}" class="card-img-top"/>
                          <div class="card-body">
-                                <h5 class="card-title">${img}</h5>
+                                <p>${start_and_end(img)}</p>
                                 <a href="#" class="btn btn-secondary btn-sm"><i class="bi bi-download"></i></a>
                          </div><!-- card -->
                     </div><!-- card -->
@@ -86,3 +86,11 @@ for (let i = 0; i < totalPages; i++) {
 }
 
 console.log(`Generated ${totalPages} pages in the "${OUTPUT_FOLDER}" folder.`);
+
+
+function start_and_end(str) {
+    if (str.length > 35) {
+        return str.substr(0, 20) + '...' + str.substr(str.length - 10, str.length);
+    }
+    return str;
+}

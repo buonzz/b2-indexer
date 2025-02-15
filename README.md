@@ -53,7 +53,7 @@ this reads the JSONL file from previous step, then generate thumbnail for each.
 ### Generate static website
 
 ```
-npm run website
+npm run generate-site
 ```
 
 to open the site
