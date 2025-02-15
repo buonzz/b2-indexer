@@ -8,20 +8,20 @@ const { exec } = require('child_process');
 require('dotenv').config()
 
 const b2 = new B2({
-    applicationKeyId: process.env.APPLICATION_KEY_ID, // or accountId: 'accountId'
-    applicationKey: process.env.APPLICATION_KEY // or masterApplicationKey
+    applicationKeyId: process.env.APPLICATION_KEY_ID,
+    applicationKey: process.env.APPLICATION_KEY
 });
 
 const folderPath = path.join(__dirname, 'dist/thumbs/');
 const tmpFolderPath = path.join(__dirname, 'tmp/');
 const indexPath = path.join(__dirname, 'dist/' + process.env.BUCKET_ID + '-index.jsonl');
 
-const isImage = ['.jpg', '.jpeg', '.png']; //you can add more
-const isVideo = ['.mov', '.mp4']; // you can add more extension
-
+const isImage = ['.jpg', '.jpeg', '.png'];
+const isVideo = ['.mov', '.mp4'];
 
 async function run() {
-
+    const pLimit = (await import('p-limit')).default;
+    const limit = pLimit(5); // Limit concurrent FFmpeg processes
     const fileStream = fs.createReadStream(indexPath);
     var authorizationToken = null;
     var apiUrl = null;
@@ -32,9 +32,9 @@ async function run() {
         authorizationToken = authorize_resp.data.authorizationToken;
         apiUrl = authorize_resp.data.apiUrl;
         bucketName = authorize_resp.data.allowed.bucketName;
-        //console.log(authorize_resp);
     } catch (err) {
         console.log('Error authorizing bucket');
+        return;
     }
 
     const rl = readline.createInterface({
@@ -42,52 +42,36 @@ async function run() {
         crlfDelay: Infinity
     });
 
-    rl.on('line', (line) => { onLineRead(line, authorizationToken, apiUrl, bucketName) });
+    const tasks = [];
 
-    rl.on('close', () => {
-        //console.log('Finished reading index.');
-        //console.log('Success!');
+    rl.on('line', (line) => {
+        tasks.push(limit(() => onLineRead(line, authorizationToken, apiUrl, bucketName)));
+    });
+
+    rl.on('close', async () => {
+        await Promise.all(tasks);
+        console.log('All files processed!');
     });
 }
 
-async function onLineRead(line, authorizationToken,
-    apiUrl, bucketName) {
+async function onLineRead(line, authorizationToken, apiUrl, bucketName) {
     const jsonLine = JSON.parse(line);
-    var extension = path.extname(jsonLine.filename);
-    extension = extension.toLowerCase();
+    var extension = path.extname(jsonLine.filename).toLowerCase();
 
     if (!isImage.includes(extension) && !isVideo.includes(extension)) {
-        console.log('skipped ' + jsonLine.filename);
+        console.log('Skipped ' + jsonLine.filename);
         return;
     }
 
     try {
-        const filePath = folderPath + jsonLine.filename;
-        console.log('processing file ' + jsonLine.filename);
+        console.log('Processing file ' + jsonLine.filename);
 
-        // grab the image and scale down
         if (isImage.includes(extension)) {
-            let b2_response = await b2.downloadFileById({
-                fileId: jsonLine.fileId,
-                responseType: 'arraybuffer',
-                onDownloadProgress: (event) => { console.log(event) }
-            });
-
-            const percentage = 5;
-            sharp(b2_response.data).metadata()
-                .then(info => {
-                    const width = Math.round(info.width * percentage / 100);
-                    const height = Math.round(info.height * percentage / 100);
-                    return sharp(b2_response.data).resize(width, height).toBuffer();
-                })
-                .then(output => {
-                    fs.writeFileSync(filePath, output);
-                });
+            await processImage(jsonLine);
         }
 
         if (isVideo.includes(extension)) {
-            generateVideoThumbnail(jsonLine, authorizationToken,
-                apiUrl, bucketName);
+            await generateVideoThumbnail(jsonLine, authorizationToken, apiUrl, bucketName);
         }
 
     } catch (err) {
@@ -95,31 +79,46 @@ async function onLineRead(line, authorizationToken,
     }
 }
 
-async function generateVideoThumbnail(jsonLine, authorizationToken,
-    apiUrl, bucketName) {
+async function processImage(jsonLine) {
+    let b2_response = await b2.downloadFileById({
+        fileId: jsonLine.fileId,
+        responseType: 'arraybuffer'
+    });
 
-    const videoUrl = getFileUrl(jsonLine.filename, authorizationToken,
-        apiUrl, bucketName);
+    const filePath = folderPath + jsonLine.filename.replace(/\//g, '_');
+    const percentage = 5;
 
-    //console.log(videoUrl);
-    const outputThumbnail = folderPath + jsonLine.filename + '-thumb.jpg';
+    try {
+        const metadata = await sharp(b2_response.data).metadata();
+        const width = Math.round(metadata.width * percentage / 100);
+        const height = Math.round(metadata.height * percentage / 100);
+        const output = await sharp(b2_response.data).resize(width, height).toBuffer();
+        fs.writeFileSync(filePath, output);
+    } catch (error) {
+        console.error(`Error processing image ${jsonLine.filename}:`, error);
+    }
+}
 
-    const ffmpegCmd = `ffmpeg -i "${videoUrl}" -ss 00:00:05 -vframes 1 -q:v 2 -update 1 "${outputThumbnail}"`;
+async function generateVideoThumbnail(jsonLine, authorizationToken, apiUrl, bucketName) {
+    return new Promise((resolve, reject) => {
+        const videoUrl = getFileUrl(jsonLine.filename, authorizationToken, apiUrl, bucketName);
+        const outputThumbnail = folderPath + jsonLine.filename.replace(/\//g, '_') + '-thumb.jpg';
+        const ffmpegCmd = `ffmpeg -i "${videoUrl}" -ss 00:00:05 -vframes 1 -q:v 2 -update 1 "${outputThumbnail}"`;
 
-    exec(ffmpegCmd, (error, stdout, stderr) => {
-        if (error) {
-            console.error(`Error generating thumbnail: ${error.message}`);
-            return;
-        }
-        if (stderr) console.log(`FFmpeg output: ${stderr}`);
-        console.log(`Thumbnail saved as ${outputThumbnail}`);
+        exec(ffmpegCmd, (error, stdout, stderr) => {
+            if (error) {
+                console.error(`Error generating thumbnail for ${jsonLine.filename}: ${error.message}`);
+                return reject(error);
+            }
+            if (stderr) console.log(`FFmpeg output for ${jsonLine.filename}: ${stderr}`);
+            console.log(`Thumbnail saved as ${outputThumbnail}`);
+            resolve(outputThumbnail);
+        });
     });
 }
 
-function getFileUrl(filename, authorizationToken,
-    apiUrl, bucketName) {
+function getFileUrl(filename, authorizationToken, apiUrl, bucketName) {
     return `${apiUrl}/file/${bucketName}/${filename}?Authorization=${authorizationToken}`;
 }
-
 
 run();
