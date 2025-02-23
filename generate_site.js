@@ -14,7 +14,8 @@ if (!fs.existsSync(OUTPUT_FOLDER)) {
 
 // Read image files from the folder
 const images = fs.readdirSync(IMAGES_FOLDER).filter(file => {
-    return ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(path.extname(file).toLowerCase());
+    var extensions = process.env.IMAGE_EXTENSIONS.split(',').map(ext => `.${ext}`);
+    return extensions.includes(path.extname(file).toLowerCase());
 });
 
 const totalPages = Math.ceil(images.length / IMAGES_PER_PAGE);

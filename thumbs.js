@@ -13,11 +13,10 @@ const b2 = new B2({
 });
 
 const folderPath = path.join(__dirname, 'dist/thumbs/');
-const tmpFolderPath = path.join(__dirname, 'tmp/');
 const indexPath = path.join(__dirname, 'dist/' + 'index.jsonl');
 
-const isImage = ['.jpg', '.jpeg', '.png'];
-const isVideo = ['.mov', '.mp4'];
+const isImage = process.env.IMAGE_EXTENSIONS.split(',').map(ext => `.${ext}`);
+const isVideo = process.env.VIDEO_EXTENSIONS.split(',').map(ext => `.${ext}`);
 
 async function run() {
     const pLimit = (await import('p-limit')).default;
