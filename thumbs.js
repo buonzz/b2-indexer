@@ -14,7 +14,7 @@ const b2 = new B2({
 
 const folderPath = path.join(__dirname, 'dist/thumbs/');
 const tmpFolderPath = path.join(__dirname, 'tmp/');
-const indexPath = path.join(__dirname, 'dist/' + process.env.BUCKET_ID + '-index.jsonl');
+const indexPath = path.join(__dirname, 'dist/' + 'index.jsonl');
 
 const isImage = ['.jpg', '.jpeg', '.png'];
 const isVideo = ['.mov', '.mp4'];
