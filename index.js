@@ -64,8 +64,21 @@ async function processPage(b2, stream, params) {
         }
     });
 
-
+    main_loop:
     for (i = 0; i < data.length; i++) {
+
+        if (process.env.EXCLUDE_PATHS) {
+            var excludePaths = process.env.EXCLUDE_PATHS.split(",");
+            if (excludePaths.length > 0) {
+                for (j = 0; j < excludePaths.length; j++) {
+                    if (data[i].filename.startsWith(excludePaths[j])) {
+                        console.log('skipped due to  excluded folder: ' + data[i].filename);
+                        break main_loop;
+                    }
+                }
+            }
+        }
+
         stream.write(JSON.stringify(data[i]) + "\n");
         console.log('indexed ' + data[i].filename);
     }

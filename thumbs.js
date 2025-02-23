@@ -96,10 +96,15 @@ async function processImage(jsonLine) {
     });
 
     try {
-        const metadata = await sharp(b2_response.data).metadata();
-        const width = Math.round(metadata.width * percentage / 100);
-        const height = Math.round(metadata.height * percentage / 100);
-        const output = await sharp(b2_response.data).resize(width, height).toBuffer();
+        var output = b2_response.data.length;
+
+        // only resize if more than 512KB
+        if (b2_response.data.length > 500000) {
+            const metadata = await sharp(b2_response.data).metadata();
+            const width = Math.round(metadata.width * percentage / 100);
+            const height = Math.round(metadata.height * percentage / 100);
+            output = await sharp(b2_response.data).resize(width, height).toBuffer();
+        }
         fs.writeFileSync(filePath, output);
     } catch (error) {
         console.error(`Error processing image ${jsonLine.filename}:`, error);
