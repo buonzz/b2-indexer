@@ -8,7 +8,8 @@
     "index": "node index.js",
     "thumbs": "node thumbs.js",
     "generate-site": "node generate_site.js",
-    "generate-links": "node download_links.js"
+    "generate-links": "node download_links.js",
+    "generate-albums": "node generate_albums.js"
   },
   "author": "",
   "license": "ISC",

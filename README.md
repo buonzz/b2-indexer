@@ -49,6 +49,21 @@ npm run thumbs
 this reads the JSONL file from previous step, then generate thumbnail for each.
 
 
+### Generate Download links
+
+if you want to display a download button in the thumbnails
+
+```
+npm run generate-links
+```
+
+### Generate Albums
+
+
+```
+npm run generate-albums
+```
+
 ### Generate static website
 
 ```
@@ -60,13 +75,7 @@ to open the site
 http-server -o dist/
 ```
 
-### Generate Download links
 
-if you want to display a download button in the thumbnails
-
-```
-npm run generate-links
-```
 
 
 
