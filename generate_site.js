@@ -40,6 +40,7 @@ function generateHTMLPage(imagesSubset, pageIndex) {
                 <nav class=" float-end" aria-label="Page navigation example">
                     <ul class="pagination">
                         ${prevPage ? `<li class="page-item"><a class="page-link" href="${prevPage}">&laquo; Previous</a><li>` : ''}
+                        <li class="page-item"><a class="page-link" href="index.html">Albums</a><li>
                         ${nextPage ? `<li class="page-item"><a  class="page-link" href="${nextPage}">Next &raquo;</a></li>` : ''}
                     </ul>
                 </nav>
@@ -92,7 +93,7 @@ function generateHTMLPage(imagesSubset, pageIndex) {
 
     if (pageIndex == 1) {
         fs.writeFileSync(path.join(OUTPUT_FOLDER, `page${pageIndex}.html`), htmlContent);
-        fs.writeFileSync(path.join(OUTPUT_FOLDER, `index.html`), htmlContent); // extra index file
+        fs.writeFileSync(path.join(OUTPUT_FOLDER, `all-index.html`), htmlContent); // extra index file
     }
     else
         fs.writeFileSync(path.join(OUTPUT_FOLDER, `page${pageIndex}.html`), htmlContent);
