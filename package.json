@@ -9,12 +9,14 @@
     "thumbs": "node thumbs.js",
     "generate-site": "node generate_site.js",
     "generate-links": "node download_links.js",
-    "generate-albums": "node generate_albums.js"
+    "generate-albums": "node generate_albums.js",
+    "generate-site-albums": "node generate_site_albums.js"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
     "backblaze-b2": "^1.7.0",
+    "big-json": "^3.2.0",
     "dotenv": "^16.4.7",
     "p-limit": "^6.2.0",
     "sharp": "^0.33.5"

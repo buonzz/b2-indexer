@@ -68,6 +68,7 @@ npm run generate-albums
 
 ```
 npm run generate-site
+npm run generate-site-albums
 ```
 
 to open the site
