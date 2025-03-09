@@ -58,8 +58,6 @@ npm run generate-links
 ```
 
 ### Generate Albums
-
-
 ```
 npm run generate-albums
 ```
