@@ -13,8 +13,8 @@ const b2 = new B2({
 });
 
 const folderPath = path.join(__dirname, 'dist/thumbs/');
-const indexPath = path.join(__dirname, 'dist/' + process.env.BUCKET_ID + '-index.jsonl');
-const linksPath = path.join(__dirname, 'dist/' + process.env.BUCKET_ID + '-download-links.json');
+const indexPath = path.join(__dirname, 'dist/index.jsonl');
+const linksPath = path.join(__dirname, 'dist/download-links.json');
 var newLinks = {};
 
 

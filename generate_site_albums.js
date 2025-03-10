@@ -80,10 +80,10 @@ function generateHTMLPage(imagesSubset, pageIndex, totalPages, album) {
         <div class="row" id="grid">
             ${imagesSubset.map(img => `<div class="col-sm-6 col-lg-2 mt-2">
                     <div class="card">
-                        <img src="thumbs/${img}" class="card-img-top"/>
+                        <img src="/${img.thumbnail}" class="card-img-top"/>
                          <div class="card-body">
-                                <p>${start_and_end(img)}</p>
-                                <a href="#" class="download-btn" data-filename="${img}" class="btn btn-secondary btn-sm"><i class="bi bi-download"></i></a>
+                                <p>${start_and_end(img.filename)}</p>
+                                <a href="#" class="download-btn" data-filename="${img.filename.replace(/\//g, '_')}" class="btn btn-secondary btn-sm"><i class="bi bi-download"></i></a>
                          </div><!-- card -->
                     </div><!-- card -->
                 </div><!-- col -->`).join('\n')}

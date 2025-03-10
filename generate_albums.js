@@ -44,10 +44,18 @@ async function run() {
             key = 'No Album';
         }
 
-        if (albums.hasOwnProperty(key)) {
-            albums[key].push(jsonLine.filename);
+        var thumbnail = '';
+
+        if (isImage.includes(extension)) {
+            thumbnail = 'thumbs/' + jsonLine.filename.replace(/\//g, '_')
         } else {
-            albums[key] = [jsonLine.filename];
+            thumbnail = 'thumbs/' + jsonLine.filename.replace(/\//g, '_') + '-thumb.jpg'
+        }
+
+        if (albums.hasOwnProperty(key)) {
+            albums[key].push({ "filename": jsonLine.filename, "thumbnail": thumbnail });
+        } else {
+            albums[key] = [{ "filename": jsonLine.filename, "thumbnail": thumbnail }];
         }
     });
 
