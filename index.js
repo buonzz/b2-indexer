@@ -1,89 +1,97 @@
-const B2 = require('backblaze-b2');
+'use strict';
+
 const fs = require('fs');
-const path = require('path');
+const {
+    DIST_DIR,
+    INDEX_PATH,
+    createB2Client,
+    ensureDir,
+    requireEnv,
+    envInt,
+    envBool,
+    writeJsonLine
+} = require('./lib/common');
 
-require('dotenv').config({ quiet: true })
+const PAGE_SIZE = envInt('B2_PAGE_SIZE', 10000, { min: 1, max: 10000 });
+const VERBOSE = envBool('VERBOSE', false);
+const EXCLUDE_PATHS = (process.env.EXCLUDE_PATHS || '')
+    .split(',')
+    .map((prefix) => prefix.trim())
+    .filter(Boolean);
 
-const b2 = new B2({
-    applicationKeyId: process.env.APPLICATION_KEY_ID, // or accountId: 'accountId'
-    applicationKey: process.env.APPLICATION_KEY // or masterApplicationKey
-});
+function isExcluded(filename) {
+    return EXCLUDE_PATHS.some((prefix) => filename.startsWith(prefix));
+}
 
-const filePath = path.join(__dirname, 'dist/' + 'index.jsonl');
-
+function toIndexEntry(file) {
+    return {
+        filename: file.fileName,
+        contentType: file.contentType,
+        contentLength: file.contentLength,
+        contentSha1: file.contentSha1,
+        fileId: file.fileId,
+        uploadTimestamp: file.uploadTimestamp
+    };
+}
 
 async function run() {
+    await ensureDir(DIST_DIR);
 
-    const stream = fs.createWriteStream(filePath, { flags: 'w' });
+    const b2 = createB2Client();
+    await b2.authorize();
 
-    try {
-        await b2.authorize();
-    } catch (err) {
-        console.log('Error authorizing bucket');
-    }
-
-    var listFilesParams = {
-        bucketId: process.env.BUCKET_ID,
-        delimiter: ''
-    }
-    listFilesParams.maxFileCount = 1000;
-    var startFileName = null;
-    var ctr = 1;
-    while (true) {
-        if (startFileName != null) {
-            listFilesParams.startFileName = startFileName;
-        }
-
-        startFileName = await processPage(b2, stream, listFilesParams);
-        //console.log('startFileName=' + startFileName);
-        if (startFileName == null) {
-            break;
-        }
-        console.log('page: ' + ctr);
-        console.log('files indexed: ' + ctr * 1000);
-        ctr++;
-    }
-
-
-    stream.end();
-
-    console.log('Estimated files indexed: ' + ctr * 1000);
-    console.log('Success!');
-}
-
-async function processPage(b2, stream, params) {
-    const filenames = await b2.listFileNames(params);
-    let data = filenames.data.files.map(function (cur) {
-        return {
-            filename: cur.fileName,
-            contentType: cur.contentType,
-            contentLength: cur.contentLength,
-            contentSha1: cur.contentSha1,
-            fileId: cur.fileId,
-            uploadTimestamp: cur.uploadTimestamp
-        }
+    const bucketId = requireEnv('BUCKET_ID');
+    const stream = fs.createWriteStream(INDEX_PATH, { flags: 'w' });
+    const finished = new Promise((resolve, reject) => {
+        stream.once('finish', resolve);
+        stream.once('error', reject);
     });
 
-    main_loop:
-    for (i = 0; i < data.length; i++) {
+    let startFileName = null;
+    let page = 0;
+    let indexed = 0;
+    let skipped = 0;
 
-        if (process.env.EXCLUDE_PATHS) {
-            var excludePaths = process.env.EXCLUDE_PATHS.split(",");
-            if (excludePaths.length > 0) {
-                for (j = 0; j < excludePaths.length; j++) {
-                    if (data[i].filename.startsWith(excludePaths[j])) {
-                        console.log('skipped due to  excluded folder: ' + data[i].filename);
-                        break main_loop;
+    try {
+        do {
+            const params = { bucketId, maxFileCount: PAGE_SIZE };
+            if (startFileName) {
+                params.startFileName = startFileName;
+            }
+
+            const response = await b2.listFileNames(params);
+            page += 1;
+
+            for (const file of response.data.files) {
+                const entry = toIndexEntry(file);
+
+                if (isExcluded(entry.filename)) {
+                    skipped += 1;
+                    if (VERBOSE) {
+                        console.log(`skipped (excluded): ${entry.filename}`);
                     }
+                    continue;
+                }
+
+                await writeJsonLine(stream, entry);
+                indexed += 1;
+                if (VERBOSE) {
+                    console.log(`indexed: ${entry.filename}`);
                 }
             }
-        }
 
-        stream.write(JSON.stringify(data[i]) + "\n");
-        console.log('indexed ' + data[i].filename);
+            startFileName = response.data.nextFileName || null;
+            console.log(`page ${page}: ${indexed} indexed, ${skipped} skipped`);
+        } while (startFileName);
+    } finally {
+        stream.end();
+        await finished;
     }
 
-    return filenames.data.nextFileName;
+    console.log(`Done. Indexed ${indexed} files (${skipped} skipped).`);
 }
 
-run();
+run().catch((err) => {
+    console.error(err.stack || err);
+    process.exitCode = 1;
+});

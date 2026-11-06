@@ -3,8 +3,7 @@
 node_modules/
 /dist/*.jsonl
 /tmp/*.*
-/dist/thumbs/*.jpg
-/dist/thumbs/*.jpeg
-/dist/thumbs/*.PNG
+/dist/thumbs/*
+!/dist/thumbs/.gitkeep
 /dist/*.html
 /dist/*.json

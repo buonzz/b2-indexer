@@ -69,6 +69,16 @@ npm run generate-site
 npm run generate-site-albums
 ```
 
+or run all of the `generate-*` steps at once:
+
+```
+npm run generate
+```
+
+Thumbnails are resized to a maximum dimension of 500px by default (see
+`.env.example` for tuning options), and downloads are written through a
+temporary file so interrupted runs do not leave partial output.
+
 to open the site
 ```
 http-server -o dist/

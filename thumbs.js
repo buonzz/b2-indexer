@@ -1,141 +1,214 @@
-const B2 = require('backblaze-b2');
+'use strict';
+
 const fs = require('fs');
-const readline = require('readline');
+const fsp = require('fs/promises');
 const path = require('path');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const { pipeline } = require('stream/promises');
 const sharp = require('sharp');
-const { exec } = require('child_process');
+const {
+    THUMBS_DIR,
+    INDEX_PATH,
+    createB2Client,
+    ensureDir,
+    fileExists,
+    envInt,
+    envBool,
+    extname,
+    isImage,
+    isVideo,
+    readJsonl,
+    thumbKey,
+    downloadUrl
+} = require('./lib/common');
 
-require('dotenv').config({ quiet: true })
+const execFileAsync = promisify(execFile);
 
-const b2 = new B2({
-    applicationKeyId: process.env.APPLICATION_KEY_ID,
-    applicationKey: process.env.APPLICATION_KEY
-});
+const CONCURRENCY = envInt('THUMBNAIL_CONCURRENCY', 5, { min: 1, max: 32 });
+const RESIZE_THRESHOLD = envInt('THUMBNAIL_MIN_BYTES', 500000, { min: 0 });
+const MAX_DIMENSION = envInt('THUMBNAIL_MAX_DIMENSION', 500, { min: 16 });
+const JPEG_QUALITY = envInt('THUMBNAIL_QUALITY', 80, { min: 1, max: 100 });
+const VIDEO_SEEK_SECONDS = envInt('VIDEO_SEEK_SECONDS', 5, { min: 0 });
+const VERBOSE = envBool('VERBOSE', false);
+const PROGRESS_EVERY = envInt('PROGRESS_EVERY', 100, { min: 1 });
 
-const folderPath = path.join(__dirname, 'dist/thumbs/');
-const indexPath = path.join(__dirname, 'dist/' + 'index.jsonl');
-
-const isImage = process.env.IMAGE_EXTENSIONS.split(',').map(ext => `.${ext}`);
-const isVideo = process.env.VIDEO_EXTENSIONS.split(',').map(ext => `.${ext}`);
+const SHARP_FORMATS = {
+    '.jpg': 'jpeg',
+    '.jpeg': 'jpeg',
+    '.png': 'png',
+    '.webp': 'webp',
+    '.avif': 'avif',
+    '.tif': 'tiff',
+    '.tiff': 'tiff',
+    '.gif': 'gif'
+};
 
 async function run() {
     const pLimit = (await import('p-limit')).default;
-    const limit = pLimit(5); // Limit concurrent FFmpeg processes
-    const fileStream = fs.createReadStream(indexPath);
-    var authorizationToken = null;
-    var apiUrl = null;
-    var bucketName = null;
+    const limit = pLimit(CONCURRENCY);
 
-    try {
-        var authorize_resp = await b2.authorize();
-        authorizationToken = authorize_resp.data.authorizationToken;
-        apiUrl = authorize_resp.data.apiUrl;
-        bucketName = authorize_resp.data.allowed.bucketName;
-    } catch (err) {
-        console.log('Error authorizing bucket');
-        return;
-    }
+    await ensureDir(THUMBS_DIR);
 
-    const rl = readline.createInterface({
-        input: fileStream,
-        crlfDelay: Infinity
-    });
+    const b2 = createB2Client();
+    const response = await b2.authorize();
+    const auth = {
+        apiUrl: response.data.apiUrl,
+        bucketName: response.data.allowed.bucketName,
+        authorizationToken: response.data.authorizationToken
+    };
 
-    const tasks = [];
+    const ctx = { b2, auth, seen: new Set() };
+    const stats = { created: 0, skipped: 0, failed: 0, total: 0 };
+    const pending = new Set();
 
-    rl.on('line', (line) => {
-        tasks.push(limit(() => onLineRead(line, authorizationToken, apiUrl, bucketName)));
-    });
-
-    rl.on('close', async () => {
-        await Promise.all(tasks);
-        console.log('All files processed!');
-    });
-}
-
-async function onLineRead(line, authorizationToken, apiUrl, bucketName) {
-    const jsonLine = JSON.parse(line);
-    var extension = path.extname(jsonLine.filename).toLowerCase();
-
-    if (!isImage.includes(extension) && !isVideo.includes(extension)) {
-        console.log('Skipped ' + jsonLine.filename);
-        return;
-    }
-
-    try {
-        console.log('Processing file ' + jsonLine.filename);
-
-        if (isImage.includes(extension)) {
-            await processImage(jsonLine);
-        }
-
-        if (isVideo.includes(extension)) {
-            await generateVideoThumbnail(jsonLine, authorizationToken, apiUrl, bucketName);
-        }
-
-    } catch (err) {
-        console.log(err);
-    }
-}
-
-async function processImage(jsonLine) {
-
-    const filePath = folderPath + jsonLine.filename.replace(/\//g, '_');
-    const percentage = 5;
-
-
-    if (fs.existsSync(filePath)) {
-        console.log(filePath + ' already exists, skipped');
-        return;
-    }
-
-    let b2_response = await b2.downloadFileById({
-        fileId: jsonLine.fileId,
-        responseType: 'arraybuffer'
-    });
-
-    try {
-        var output = b2_response.data.length;
-
-        // only resize if more than 512KB
-        if (b2_response.data.length > 500000) {
-            const metadata = await sharp(b2_response.data).metadata();
-            const width = Math.round(metadata.width * percentage / 100);
-            const height = Math.round(metadata.height * percentage / 100);
-            output = await sharp(b2_response.data).resize(width, height).toBuffer();
-        }
-        fs.writeFileSync(filePath, output);
-    } catch (error) {
-        console.error(`Error processing image ${jsonLine.filename}:`, error);
-    }
-}
-
-async function generateVideoThumbnail(jsonLine, authorizationToken, apiUrl, bucketName) {
-    return new Promise((resolve, reject) => {
-
-        const videoUrl = getFileUrl(jsonLine.filename, authorizationToken, apiUrl, bucketName);
-        const outputThumbnail = folderPath + jsonLine.filename.replace(/\//g, '_') + '-thumb.jpg';
-        const ffmpegCmd = `ffmpeg -i "${videoUrl}" -ss 00:00:05 -vframes 1 -q:v 2 -update 1 "${outputThumbnail}"`;
-
-        if (fs.existsSync(outputThumbnail)) {
-            console.log(outputThumbnail + ' already exists, skipped');
-            return reject(outputThumbnail + ' already exists, skipped');
-        }
-
-        exec(ffmpegCmd, (error, stdout, stderr) => {
-            if (error) {
-                console.error(`Error generating thumbnail for ${jsonLine.filename}: ${error.message}`);
-                return reject(error);
+    for await (const entry of readJsonl(INDEX_PATH)) {
+        const task = limit(async () => {
+            try {
+                const status = await processEntry(entry, ctx);
+                stats[status] += 1;
+            } catch (err) {
+                stats.failed += 1;
+                console.error(`failed: ${entry.filename}: ${err.message}`);
             }
-            if (stderr) console.log(`FFmpeg output for ${jsonLine.filename}: ${stderr}`);
-            console.log(`Thumbnail saved as ${outputThumbnail}`);
-            resolve(outputThumbnail);
+
+            stats.total += 1;
+            if (VERBOSE) {
+                console.log(`processed: ${entry.filename}`);
+            } else if (stats.total % PROGRESS_EVERY === 0) {
+                console.log(`processed ${stats.total} files...`);
+            }
         });
+
+        const tracked = task.finally(() => pending.delete(tracked));
+        pending.add(tracked);
+
+        if (pending.size >= CONCURRENCY * 2) {
+            await Promise.race(pending);
+        }
+    }
+
+    await Promise.allSettled(pending);
+
+    console.log(
+        `Done. ${stats.created} created, ${stats.skipped} skipped, ${stats.failed} failed (${stats.total} total).`
+    );
+}
+
+async function processEntry(entry, ctx) {
+    if (!isImage(entry.filename) && !isVideo(entry.filename)) {
+        return 'skipped';
+    }
+
+    const dest = path.join(THUMBS_DIR, thumbnailName(entry));
+
+    if (ctx.seen.has(dest)) {
+        console.warn(`duplicate thumbnail name, skipping: ${entry.filename}`);
+        return 'skipped';
+    }
+    ctx.seen.add(dest);
+
+    if (await fileExists(dest)) {
+        return 'skipped';
+    }
+
+    if (isImage(entry.filename)) {
+        await processImage(entry, dest, ctx.b2);
+    } else {
+        await processVideo(entry, dest, ctx.auth);
+    }
+
+    return 'created';
+}
+
+function thumbnailName(entry) {
+    const key = thumbKey(entry.filename);
+    return isVideo(entry.filename) ? `${key}-thumb.jpg` : key;
+}
+
+async function processImage(entry, dest, b2) {
+    const response = await b2.downloadFileById({
+        fileId: entry.fileId,
+        responseType: 'stream'
     });
+    const tmpPath = `${dest}.tmp`;
+
+    try {
+        if (Number(entry.contentLength) > RESIZE_THRESHOLD) {
+            await writeResized(response.data, tmpPath, entry.filename);
+        } else {
+            await pipeline(response.data, fs.createWriteStream(tmpPath));
+        }
+        await fsp.rename(tmpPath, dest);
+    } catch (err) {
+        await fsp.rm(tmpPath, { force: true });
+        throw err;
+    }
 }
 
-function getFileUrl(filename, authorizationToken, apiUrl, bucketName) {
-    return `${apiUrl}/file/${bucketName}/${filename}?Authorization=${authorizationToken}`;
+async function writeResized(input, outputPath, filename) {
+    const format = SHARP_FORMATS[extname(filename)];
+
+    if (!format) {
+        const chunks = [];
+        for await (const chunk of input) {
+            chunks.push(chunk);
+        }
+        const buffer = await sharp(Buffer.concat(chunks))
+            .rotate()
+            .resize(resizeOptions())
+            .toBuffer();
+        await fsp.writeFile(outputPath, buffer);
+        return;
+    }
+
+    const transform = sharp()
+        .rotate()
+        .resize(resizeOptions());
+
+    transform.toFormat(format, format === 'jpeg' ? { quality: JPEG_QUALITY } : {});
+
+    await pipeline(input, transform, fs.createWriteStream(outputPath));
 }
 
-run();
+function resizeOptions() {
+    return {
+        width: MAX_DIMENSION,
+        height: MAX_DIMENSION,
+        fit: 'inside',
+        withoutEnlargement: true
+    };
+}
+
+async function processVideo(entry, dest, auth) {
+    const videoUrl = downloadUrl(
+        auth.apiUrl,
+        auth.bucketName,
+        entry.filename,
+        auth.authorizationToken
+    );
+    const tmpPath = `${dest}.tmp.jpg`;
+    const args = [
+        '-loglevel', 'error',
+        '-ss', String(VIDEO_SEEK_SECONDS),
+        '-i', videoUrl,
+        '-frames:v', '1',
+        '-q:v', '2',
+        '-update', '1',
+        '-y',
+        tmpPath
+    ];
+
+    try {
+        await execFileAsync('ffmpeg', args);
+        await fsp.rename(tmpPath, dest);
+    } catch (err) {
+        await fsp.rm(tmpPath, { force: true });
+        throw err;
+    }
+}
+
+run().catch((err) => {
+    console.error(err.stack || err);
+    process.exitCode = 1;
+});

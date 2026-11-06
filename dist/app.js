@@ -1,21 +1,28 @@
 $(function () {
-    $('#grid').imagesLoaded(function () {
-        $('#grid').masonry({
-            // options
-            percentPosition: true,
+    var $grid = $('#grid');
+
+    if ($grid.length && $.fn.imagesLoaded) {
+        $grid.imagesLoaded(function () {
+            $grid.masonry({
+                percentPosition: true
+            });
         });
-    });
+    }
 
-    $('.download-btn').click(function (e) {
+    $(document).on('click', '.download-btn', function (e) {
         e.preventDefault();
-        var key = $(this).data('filename');
-        key = key.replace('-thumb.jpg', '');
 
-        if (downloadLinks.hasOwnProperty(key)) {
+        if (!downloadLinks) {
+            alert('Download links are still loading. Please try again.');
+            return;
+        }
+
+        var key = String($(this).data('filename')).replace('-thumb.jpg', '');
+
+        if (Object.prototype.hasOwnProperty.call(downloadLinks, key)) {
             window.open(downloadLinks[key], '_blank');
         } else {
-            alert('No Download link available yet..');
+            alert('No download link available yet.');
         }
     });
-
 });
