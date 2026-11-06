@@ -1,50 +1,58 @@
 # Plan: Scaling `b2-indexer` into a Self-Hosted Photo/Media Library
 
-**Status:** Draft for review
+**Status:** Revised draft — home-server-first
 **Date:** 2026-11-06
 **Author:** Darwin Biler
 **Scope:** Architecture, cost model, and phased implementation. No code in this document.
+
+> **Revision note.** This supersedes the earlier AWS-first draft. The default
+> deployment is now **this home server** (Gmktec M5 Plus): it runs the indexing,
+> owns the local SQLite catalog, and serves the web app over LAN/Tailscale.
+> B2 remains the system of record for bytes. AWS is demoted to an optional
+> escape hatch for later (Appendix A), used only when a concrete threshold is
+> crossed.
 
 ---
 
 ## 0. TL;DR
 
 The goal is a self-hosted Google Photos: media lives in a Backblaze B2 bucket you
-own, AWS indexes it, and a web app lets you browse/search it cheaply at terabyte
-scale.
+own, one always-on home server indexes it, and a small web app lets you
+browse/search it at terabyte scale.
 
-**Verdict on the proposed architecture:** the direction is right, but the
-proposed pipeline is over-built in the wrong places and under-built in others.
+**Recommended shape:**
 
-- ✅ **Right:** B2 owns the bytes, Parquet on S3 is the queryable metadata lake,
-  Athena for ad-hoc SQL.
-- ⚠️ **Change:** drop **Firehose**. You do not have a streaming firehose; a
-  scheduled/triggered batch writer that emits Parquet directly is cheaper and
-  simpler than Firehose + format conversion.
-- ⚠️ **Change:** Athena should **not** be the photo app's hot query path.
-  Athena has multi-second latency, no full-text/fuzzy search, and needs Glue
-  catalog management. Keep it for analytics/ad-hoc, but serve the UI from a
-  compact **SQLite FTS5 serving index** (sharded as it grows).
-- ❌ **Fix:** "static website in S3 with basic auth" does not exist. S3 static
-  website hosting is public, HTTP-only, and has no auth primitive. You need
-  CloudFront + an auth function (or Cognito/Cloudflare Access) in front of a
-  private bucket.
-- ❌ **Fix:** never serve media through AWS. Original bytes and thumbnails
-  should be delivered from B2 (free egress up to 3× stored) or a CDN partner
-  with free B2 egress. AWS egress at ~$0.09/GB is the one decision that can
-  destroy the cost model.
-- ➕ **Add:** an ingestion story. The current proposal has no defined source of
-  events. Use B2 Event Notifications → webhook → queue → worker, plus a
-  scheduled reconciliation pass (events are at-least-once and can be missed).
-- ➕ **Add:** EXIF/ffprobe metadata extraction (capture date, GPS, camera,
-  dimensions, duration), stable IDs, dedupe, and thumbnails for images, video
-  poster frames, and audio art.
+- **B2** = media origin (originals + optional derivatives). Never duplicated.
+- **Home server** = indexer + local **SQLite** catalog with **FTS5** + Node API.
+- **Caddy** = HTTPS, static app, reverse proxy, auth. Replaces CloudFront/API
+  Gateway entirely.
+- **Access** = LAN (`192.168.0.4`) and Tailscale (`100.81.195.27`) by default.
+- **AWS** = optional; only if you later need public multi-user serving,
+  availability beyond this box, or serverless job execution.
 
-**Recommended shape:** *B2 = media origin, AWS = metadata control plane,
-SQLite/DuckDB = serving index, CloudFront = edge/auth.* At rest, cost is
-dominated by B2 storage (~$7/TB/month); the AWS control plane is roughly
-**$0–25/month** even at 10M objects / 100TB, if you avoid the usual serverless
-traps (NAT Gateway, Firehose, Glue crawlers, OpenSearch, and S3 egress).
+**Why this is cheaper and simpler than the AWS-first draft:**
+
+- The plan's AWS control plane existed to avoid an always-on box. You already
+  have one, on the same LAN, with the CPU for `sharp`/`ffmpeg`.
+- DynamoDB + Lambda `/tmp` SQLite + Athena-in-the-UI collapse into **one
+  `library.db` file**.
+- Nightly/hourly **polling reconciliation** replaces webhook + SQS + DLQ; B2
+  listing is free (Class C) and a full re-list is a valid recovery path.
+- No NAT Gateway, no Firehose, no Glue crawlers, no CloudFront egress, no
+  serverless cold starts.
+- At-rest cost is dominated by B2 storage (~$7/TB/month). The AWS portion is
+  **$0**.
+
+**Key properties:**
+
+- Originals are **never re-uploaded**. Bytes flow B2 → server once for
+  metadata/thumbnails; the server writes JSON/rows locally.
+- The SQLite catalog is a **rebuildable derived index**, not a second source of
+  truth. Delete it any time and rebuild from B2.
+- Media is delivered **browser ↔ B2 directly** via short-TTL presigned URLs, so
+  the home uplink never carries full-res video.
+- Terabytes are in B2. The DB holds **~0.5–1.5 KB per object**; 1M items ≈
+  1–1.5 GB, 25M items ≈ 25–30 GB.
 
 ---
 
@@ -55,23 +63,30 @@ traps (NAT Gateway, Firehose, Glue crawlers, OpenSearch, and S3 egress).
 1. **Browse and search** a B2 bucket containing images, video, and audio.
 2. **Cheap at rest**: terabytes of media should cost storage rates, not compute
    or egress rates.
-3. **Cheap when idle**: no always-on database/cluster for a personal library.
+3. **Cheap when idle**: no managed database, no cluster, no always-billed cloud
+   service.
 4. **Scalable**: from 10k to ~10M objects without re-architecting.
-5. **Own your data**: media stays in B2; metadata is exportable (Parquet/SQLite)
-   and not locked into a proprietary service.
+5. **Own your data**: media stays in B2; metadata is a portable SQLite/Parquet
+   file, not locked into a proprietary service.
 6. **Good UX**: timeline, albums, date filters, keyword search, thumbnails,
    video playback, downloads.
-7. **Secure by default**: private buckets, least-privilege keys, authenticated
-   app.
+7. **Secure by default**: private bucket, least-privilege keys, LAN/Tailscale
+   access, authenticated app.
+8. **Undemanding operations**: one box, a few systemd timers, one Caddy site.
 
 ### Constraints
 
-- B2 is the system of record for bytes. Do not duplicate originals into S3.
-- AWS list prices only; no enterprise discounts.
-- Prefer serverless/usage-based services; avoid fixed monthly minimums.
+- B2 is the system of record for bytes. Do not duplicate originals into S3 or
+  onto the home disk.
+- The home server is a single machine (Ryzen 7 5825U, 16 GB RAM, 1 TB SSD),
+  behind double NAT, on the LAN at `192.168.0.4`, reachable over Tailscale at
+  `100.81.195.27`.
 - Existing repo is CommonJS Node.js with a CLI pipeline and `dist/` output.
+  Node >= 20.9.0.
+- `ffmpeg` is available on the host; `sharp` is already a dependency.
 - Media may include formats browsers cannot play natively (HEVC/MOV); handle
   gracefully, do not assume transcoding.
+- Local disk is finite: 1 TB total, shared with other services.
 
 ### Non-Goals (for v1)
 
@@ -79,7 +94,9 @@ traps (NAT Gateway, Firehose, Glue crawlers, OpenSearch, and S3 egress).
 - Real-time collaborative editing.
 - Automatic ML face clustering / semantic search (design a hook, defer).
 - Video transcoding of the entire library (expensive; opt-in proxies only).
-- Perfect real-time consistency. Minutes-level eventual consistency is fine.
+- Perfect real-time consistency. Minutes-to-hours eventual consistency is fine.
+- High availability. If this server is down, the gallery is down; bytes remain
+  safe in B2.
 
 ---
 
@@ -91,8 +108,8 @@ scaling limits:
 
 | Area | Current behavior | Problem at scale |
 |---|---|---|
-| Listing | `b2.listFileNames` full scan into `dist/index.jsonl` | Full rescan every run; no watermark; slow on millions of objects |
-| Thumbnails | Downloads each original, resizes with `sharp`/`ffmpeg` locally | Single machine, concurrency 5; CPU/IO bound; no incremental tracking |
+| Listing | `b2.listFileNames` full scan into `dist/index.jsonl` | Full rescan every run; no watermark or diff |
+| Thumbnails | Downloads each original, resizes with `sharp`/`ffmpeg` locally | Single machine, concurrency 5; no incremental tracking |
 | Thumbnail naming | Flattens `/` to `_` | Cross-folder collisions |
 | Downloads | Pre-generates a token URL for every file into one JSON | Tokens expire (~7 days); file grows unbounded; leaks download capability |
 | Albums | First path segment only | No capture-date albums, tags, or search |
@@ -106,740 +123,781 @@ B2 native download-by-id, `EXCLUDE_PATHS`.
 
 ---
 
-## 3. Review of the Proposed Architecture
+## 3. Recommended Architecture (Home-Server-First)
 
-Proposed:
+### 3.1 Design principles
 
-```
-[indexer] → Firehose → S3 raw → Parquet (year/month/day)
-  → Glue Data Catalog → Athena → S3 static site (basic auth)
-```
+1. **Three planes on one box.**
+   - **Media plane** (huge): B2 originals + optional derivatives. Never copied
+     locally at full size.
+   - **Metadata plane** (small): `library.db` (SQLite) + `dist/thumbs/`.
+   - **Control plane** (tiny): systemd timers, the Node API, Caddy.
+2. **Download once, derive once.** Each original is read once for EXIF/ffprobe
+   and thumbnails. Serving never re-reads originals.
+3. **B2 is truth; SQLite is a cache.** The catalog can always be rebuilt by
+   re-listing (free) and re-deriving.
+4. **The app never lists the bucket.** It queries indexed rows only.
+5. **Everything idempotent.** Upsert by a stable key; re-runs are safe.
+6. **One writer.** The indexer writes; the API reads. WAL mode for concurrent
+   reads.
+7. **Two-tier realism.** Start with polling + SQLite. Add queues, webhooks, or
+   the cloud only when a measured threshold is crossed.
 
-### What is correct
-
-- **Parquet on S3 as the queryable metadata store.** Cheap, portable, good
-  compression, columnar scans, works with Athena/DuckDB/Spark.
-- **Glue + Athena for ad-hoc SQL.** Excellent for "how many videos per year",
-  exports, and rebuilding derived data.
-- **Static front end.** Cheap, cacheable, no server to patch.
-
-### What is wrong or risky
-
-| Issue | Why it matters | Recommended fix |
-|---|---|---|
-| **Firehose has no producer** | Firehose needs a stream; nothing described feeds it. Firehose also bills per GB ingested + format conversion and is designed for streaming, not a nightly batch. | Write Parquet directly from the indexer (or DuckDB/pyarrow job). Use Firehose only if ingest exceeds GB/hour sustained. |
-| **Athena as the app's query engine** | 1–5s+ latency, per-query cold start, no full-text/fuzzy search, 20-query DML concurrency default, and every keystroke would scan S3. | Build a **serving index** (SQLite FTS5 or DuckDB) refreshed from Parquet. Athena is for analytics. |
-| **"S3 static website + basic auth"** | S3 website endpoints are public and HTTP-only. There is no basic-auth feature. | Private S3 + CloudFront + CloudFront Function/Lambda@Edge auth, or Cognito, or Cloudflare Access. |
-| **Media served from AWS** | S3/CloudFront egress is ~$0.085–0.09/GB. A few hundred GB of video traffic can cost more than the entire B2 bill. | Serve originals and thumbnails from B2 (free egress up to 3× stored; $0.01/GB beyond) or a B2 Bandwidth Alliance CDN. |
-| **Date partitioning by upload day** | Photos are browsed by **capture** date, which may differ from upload date by years (imports, old drives). `year/month/day` by upload creates tiny partitions and wrong timeline buckets. | Partition the raw lake by ingest date; compact a derived catalog by **capture month**. Or partition by capture month and accept periodic rewrites. |
-| **No state / no incremental** | Re-listing and re-downloading everything is the dominant cost at TB scale. | Durable per-object state (SQLite/DynamoDB), `fileId` + `uploadTimestamp` watermarks, and event notifications. |
-| **No dedupe** | The same 4K clip uploaded twice doubles storage and confuses the timeline. | `contentSha1` exact dedupe (free from B2 listing) + optional perceptual hash for near-dupes. |
-| **Queries scan too much** | Partitioning alone does not prune without partition projection or predicate pushdown. | Athena partition projection; DuckDB/Parquet row-group stats; sort within files by capture time. |
-| **No auth on API / presigned URLs** | Pre-generated global tokens leak access to the whole bucket. | Per-request short-TTL presigned URLs, or a redirect endpoint. |
-
-### One more trap: derived files re-triggering ingestion
-
-If thumbnails/derived artifacts are written into the **same** B2 bucket, and
-the event rule prefix is `""`, every thumbnail upload fires another event →
-infinite loop. Put derived artifacts in a **separate bucket** or under a
-reserved prefix (`_derived/`, `_index/`) that is excluded from both the event
-rule and the indexer. The current `EXCLUDE_PATHS` is the right instinct; make it
-mandatory and non-configurable for reserved prefixes.
-
----
-
-## 4. Recommended Architecture
-
-### 4.1 Design principles
-
-1. **Separate the planes.**
-   - **Media plane** (huge): B2 originals + derivatives. Never through AWS.
-   - **Metadata plane** (small): S3 Parquet + serving index.
-   - **Control plane** (tiny): ingestion, auth, API, monitoring.
-2. **Download once, derive once.** Convert each original once; never re-read
-   originals for serving.
-3. **Append-only raw + compacted derived.** Raw ingest is immutable; the
-   serving catalog is rebuilt/compacted on a schedule.
-4. **The app never queries the lake directly.** It queries a small, fast
-   serving index built from the lake.
-5. **Everything idempotent.** Events are at-least-once; workers must upsert by
-   a stable key.
-6. **Two-tier realism.** Start static and serverless-cheap; add a database only
-   when a measured threshold is crossed.
-
-### 4.2 Target diagram
+### 3.2 Target diagram
 
 ```
- ┌──────────────────────────── Backblaze B2 (private) ────────────────────────────┐
- │  media/…                      originals (images / video / audio)               │
- │  _derived/thumbs/…            generated thumbnails + posters                   │
- │  _derived/previews/…          optional larger previews / proxies               │
- └───────────────┬───────────────────────────────────────────┬────────────────────┘
-                 │ B2 Event Notifications (HTTPS webhook)     │ S3-compatible GET
-                 │ (ObjectCreated / Deleted / HideMarker)     │ (free egress ≤3×)
-                 ▼                                            │
- ┌────────────── AWS Ingestion ──────────────┐                │
- │ API Gateway ─► webhook Lambda             │                │
- │   verify HMAC, return 200 < 3s            │                │
- │   ─► SQS (buffer + retries + DLQ)         │                │
- │   ─► Worker (Lambda container / Fargate)  │                │
- │        ffprobe / exiftool / sharp         │                │
- │        write thumbnail → B2 _derived/     │                │
- │        write metadata row → S3 Parquet    │                │
- │        upsert state (DynamoDB or SQLite)  │                │
- └───────────────┬───────────────────────────┘                │
-                 │                                            │
-                 ▼                                            │
- ┌──────────── AWS Metadata Lake ────────────┐                │
- │ s3://…/raw/ingest_date=YYYY-MM-DD/        │                │
- │        *.parquet  (append-only)           │                │
- │ s3://…/catalog/year=YYYY/month=MM/        │                │
- │        *.parquet  (compacted, derivable)  │                │
- │ s3://…/serving/catalog-YYYY.db (SQLite)   │                │
- └───────┬───────────────────────┬───────────┘                │
-         │                       │                            │
-         ▼                       ▼                            │
-  Athena + Glue            Search API (Lambda)                │
-  (ad-hoc / analytics)     reads serving DB, keyset paging    │
-         │                       │                            │
-         └───────────┬───────────┘                            │
-                     ▼                                        │
-          CloudFront (SPA + API + auth)  ──────►  Browser SPA │
-                     │                                        │
-                     └──── 302 / presigned URL ───────────────┘
+ ┌──────────────────────── Backblaze B2 (private) ────────────────────────┐
+ │  media/…                 originals (images / video / audio)            │
+ │  _derived/thumbs/…       optional thumbnails (survive server loss)     │
+ │  _derived/previews/…     optional larger previews / proxies            │
+ └───────────┬──────────────────────────────────────────┬─────────────────┘
+             │ b2_list_file_names (free, polled)        │ S3-compatible GET
+             │ b2_download_file_by_id (once per item)   │ / presigned URL
+             ▼                                          │
+ ┌──────────────────── Home server (this box) ──────────┼─────────────────┐
+ │  systemd timers                                       │                 │
+ │    index.js    list → diff vs library.db → enqueue    │                 │
+ │    derive.js   download → sharp/ffprobe → thumbnail   │                 │
+ │                     → upsert row (status=derived)     │                 │
+ │    compact.js  rebuild/optimize FTS, prune tombstones │                 │
+ │                                                       │                 │
+ │  library.db  (SQLite WAL)                             │                 │
+ │    items / albums / tags / items_fts / meta           │                 │
+ │                                                       │                 │
+ │  server.js   Node API (better-sqlite3)                │                 │
+ │    /api/timeline /api/search /api/albums              │                 │
+ │    /api/items/:id/stream → 302 presigned B2 URL ──────┘                 │
+ │                                                       │                 │
+ │  Caddy :443  photos.home.local                        │                 │
+ │    /      → file_server  dist/ (SPA + thumbs/)        │                 │
+ │    /api/* → reverse_proxy localhost:8090              │                 │
+ └───────────┬───────────────────────────────────────────┘                 │
+             │ LAN 192.168.0.4  /  Tailscale 100.81.195.27                  │
+             ▼                                                               │
+        Browser (desktop + phone) ──── fetch thumbnails from Caddy           │
+                                    └ fetch originals directly from B2 ─────┘
 ```
 
-### 4.3 B2 layout and keys
-
-Use **two buckets** (preferred) or one bucket with a reserved prefix:
+### 3.3 B2 layout and keys
 
 ```
 <bucket>/
   media/2024/2024-07-…            # originals (user uploads)
-  _derived/thumbs/…               # 256px webp/avif grid
-  _derived/previews/…             # 1024–1600px webp lightbox
-  _derived/posters/…              # video poster frames
-  _derived/audio-art/…            # audio cover art / waveform
+  _derived/thumbs/…               # 256px webp/avif grid (optional mirror)
+  _derived/previews/…             # 1024–1600px webp lightbox (optional)
+  _derived/posters/…              # video poster frames (optional)
 ```
 
-- Reserved prefixes (`_derived/`, `_index/`) are **excluded** from event rules
-  and from the indexer.
+- Reserved prefixes (`_derived/`, `_index/`) are **excluded** from the indexer
+  and from any future event rule. The existing `EXCLUDE_PATHS` is the right
+  instinct; make reserved prefixes non-configurable.
 - Application keys, least privilege:
   - `indexer-ro`: list + download (Class B/C), no write.
-  - `deriver-wo`: write only under `_derived/`.
+  - `deriver-wo` (only if mirroring derivatives): write only under `_derived/`.
   - `app-ro`: download authorization / presign only.
-- Private bucket. If a public gallery mode is ever wanted, use a separate
-  bucket and explicit lifecycle, never the same key.
-- Consider B2 Object Lock / versioning only if accidental-delete protection is
-  desired; versioning increases listing complexity.
+- Private bucket. If a public gallery mode is ever wanted, use a separate bucket
+  and explicit lifecycle, never the same key.
+- Thumbnails are **regenerable**, so local-only storage is valid. Mirroring to
+  B2 `_derived/` buys faster rebuilds after disaster at the cost of storage and
+  one upload per item. Decide by disk budget: at 10M items the thumbnail set is
+  ~600 GB, which will not fit beside everything else on the 1 TB SSD.
 
-### 4.4 Ingestion pipeline
+### 3.4 Ingestion: polling reconciliation (primary)
 
-**Primary: event-driven**
-
-1. B2 Event Notification rule (requires Backblaze support to enable the
-   feature) on `b2:ObjectCreated:*`, `b2:ObjectDeleted:*`,
-   `b2:HideMarkerCreated:*`, prefix `media/`, with an HMAC signing secret.
-2. Webhook = API Gateway → Lambda. It must:
-   - verify `X-Bz-Event-Notification-Signature` (HMAC-SHA256, `v1=`),
-   - drop duplicate `eventId`s,
-   - enqueue the raw event to SQS,
-   - return `200` within 3 seconds (B2 retries otherwise).
-3. SQS → worker. Worker does the heavy work (ffprobe/exiftool/sharp can exceed
-   API Gateway limits), with a DLQ and max receive count.
-4. Worker writes:
-   - metadata row → Parquet batch on S3,
-   - thumbnail → B2 `_derived/`,
-   - state/watermark → DynamoDB or SQLite (see 4.6),
-   - sets `indexed_at` / `updated_at`.
-
-**Fallback: reconciliation (mandatory)**
-
-Events are at-least-once, can be missed, and B2 can suspend a rule. Run a
-scheduled job (daily) that lists the bucket via the S3-compatible API and diffs
-against the state store:
-
-- present in B2, absent from index → enqueue create;
-- present in index, absent from B2 → mark deleted (tombstone);
-- `fileId`/`contentSha1`/size changed → re-derive.
-
-B2 listing (`ListObjectsV2` / `b2_list_file_names`) is free (Class C), so a
-daily full list is acceptable even at millions of objects, though you should
-paginate efficiently and store a continuation token.
-
-**Alternative if Event Notifications are not enabled:** run the
-reconciliation diff on a schedule (e.g., hourly/nightly) and treat it as the
-only ingest path. Simpler, slightly less real-time.
-
-### 4.5 Metadata lake (S3 + Parquet)
-
-Two datasets:
-
-| Dataset | Layout | Purpose |
-|---|---|---|
-| **Raw** | `raw/ingest_date=YYYY-MM-DD/<batch>.parquet` | Immutable event log. Replayable. |
-| **Catalog** | `catalog/year=YYYY/month=MM/media_type=…/<part>.parquet` | Compacted, deduped, sorted by `taken_at`; fastest for browse-by-date. |
-
-Rules:
-
-- Target **128–512 MB Parquet files**. Many tiny files kill Athena and inflate
-  S3 request costs. Compact daily.
-- Sort rows within a file by `taken_at`; Parquet row-group min/max stats then
-  prune date ranges.
-- Snappy or Zstd compression.
-- Hive-style partitions + **Athena partition projection** for `raw/`. This
-  avoids Glue crawlers and registered partitions. Important: Glue Data Catalog
-  bills per metadata object (table/partition), not per row — with partition
-  projection you keep only one table object, so Glue stays effectively free
-  even at 10M rows. Without projection, registering millions of partitions
-  would be a real cost.
-- Schema evolution: additive columns only; never rename/remove without a
-  migration. Parquet readers tolerate missing columns.
-- **Outgrow point:** if you need row-level updates/deletes and compaction gets
-  painful, move the catalog to **Apache Iceberg** on S3 (Athena/Glue/Spark
-  support). Iceberg gives ACID upserts, snapshots, and hidden partitioning, at
-  the cost of maintenance (compaction, snapshot expiry). Not needed for v1.
-
-### 4.6 Serving index and search API
-
-This is the piece the proposed design is missing.
-
-**Why not Athena directly in the UI**
-
-- 1–5s+ per query, cold starts.
-- No `FTS`/fuzzy/substring; `LIKE '%x%'` scans.
-- Every keystroke becomes a billable scan.
-- Query concurrency quotas and workgroup management.
-
-**Recommended: a compact SQLite FTS5 database**
-
-- Built from `catalog/` Parquet by a scheduled job (DuckDB or Node + SQLite).
-- Tables: `items`, `albums`, `tags`, `items_fts` (FTS5 over filename, album,
-  tags, OCR/transcript text).
-- Size: roughly **0.5–1.5 KB/item**, so:
-  - 100k items ≈ 100–150 MB,
-  - 1M items ≈ 1–1.5 GB,
-  - 3M items ≈ 3–4.5 GB.
-- Store `serving/catalog-<version>.db` in S3. The API Lambda downloads it to
-  `/tmp` on cold start, keyed by ETag/version, and reuses it while warm.
-  Use a Lambda **container image** so `better-sqlite3`'s native binary matches
-  the runtime, and raise ephemeral storage only if the DB is large.
-- Alternatively use **DuckDB** in the Lambda and query Parquet directly with
-  its `fts` extension. DuckDB avoids a separate build step but rebuilds the FTS
-  index per cold start; SQLite is better for repeated low-latency reads.
-
-**Sharding (before the DB gets too big)**
-
-- Shard by `year` and/or `media_type`; the API loads the shard(s) a query
-  needs. This keeps the hot DB small and cold starts fast.
-- At **>~3–5M items**, or when multi-user concurrency matters, move to a
-  managed store:
-  - Postgres on a small VPS (cheapest, ~$6–12/mo) or Aurora Serverless v2
-    (min ~0.5 ACU ≈ $44/mo — only if you want AWS-managed), or
-  - OpenSearch Serverless / self-hosted Meilisearch for heavy full-text.
-  Do not start here.
-
-**API surface (API Gateway HTTP API + Lambda)**
+B2 object-change webhooks require support enablement and a reachable HTTPS
+endpoint. This box is behind double NAT, so the default is polling:
 
 ```
-GET /api/search?q=&from=&to=&album=&type=&tag=&sort=&cursor=
-GET /api/timeline?year=&month=&cursor=
+every 15–60 min (or nightly for a cold library):
+  b2_list_file_names (paginate; free, Class C)
+    → compare fileId + contentSha1 + size against items
+    → new/changed  → status='listed', enqueue derive
+    → missing      → status='deleted', deleted_at=now (tombstone)
+    → unchanged    → nothing
+```
+
+Properties:
+
+- No webhook, no public endpoint, no SQS, no signature verification.
+- At-least-once is irrelevant: the diff is idempotent by construction.
+- A full re-list is both the routine job and the disaster-recovery path.
+- Listing millions of names is cheap but not instant; store the continuation
+  token and resume if a run exceeds its window.
+- **Never** write derived artifacts into a prefix the indexer scans. That is the
+  infinite-loop trap: upload thumb → event/list sees a new object → derive again.
+
+**Optional later: event-driven.** If real-time ingest becomes desirable, expose
+a webhook through Tailscale Funnel or Cloudflare Tunnel (never a raw port
+forward), verify HMAC, and keep reconciliation as the mandatory safety net.
+Events are at-least-once and rules can be suspended; polling must remain.
+
+### 3.5 Indexing and derivation pipeline
+
+Two passes, and only the second downloads:
+
+**Pass 1 — inventory (free).** `b2_list_file_names` already returns
+`fileName`, `contentLength`, `contentSha1`, `contentType`, `fileId`,
+`uploadTimestamp`. Upsert those immediately:
+
+```sql
+INSERT INTO items (object_key, file_id, content_sha1, size_bytes, content_type,
+                   uploaded_at, status)
+VALUES (?, ?, ?, ?, ?, ?, 'listed')
+ON CONFLICT(object_key) DO UPDATE SET
+  file_id = excluded.file_id,
+  content_sha1 = excluded.content_sha1,
+  size_bytes = excluded.size_bytes,
+  status = CASE WHEN items.content_sha1 = excluded.content_sha1
+                THEN items.status ELSE 'listed' END;
+```
+
+**Pass 2 — derive (downloads only new/changed).**
+
+```
+b2_download_file_by_id (stream)
+  → sharp metadata/EXIF  or  ffprobe       (needs the bytes)
+  → thumbnail → dist/thumbs/xxx.tmp → rename  (atomic; existing pattern)
+  → UPDATE items SET taken_at, width, height, camera_make, camera_model,
+                     gps_lat, gps_lon, duration_ms, thumb_key,
+                     status='derived', indexed_at=now
+```
+
+- Original bytes are discarded after processing. Nothing is uploaded back.
+- `status` (`listed` | `derived` | `failed` | `deleted`) makes runs resumable;
+  a crash leaves no orphaned rows and the next run picks up where it stopped.
+- Thumbnail names must be collision-free. The current `thumbKey()` flattens `/`
+  to `_`; replace it with `sha1(object_key)` or a normalized path hash.
+- Concurrency via `p-limit`; `THUMBNAIL_CONCURRENCY` stays. For a large
+  backfill, prioritize newest-first so the timeline is usable early.
+- Large videos can exceed a comfortable single-process budget; cap file size for
+  in-process derivation and put the rest on a retry list.
+
+**One-time cost:** the first derivation must read the whole library once. At
+100 MB/s, 10 TB is roughly 28 hours of sustained download. Throttle by window
+(e.g. overnight) and let `status` resume across runs. B2 egress for this is free
+within the 3× monthly allowance.
+
+### 3.6 Local catalog (SQLite)
+
+One file: `data/library.db`. SQLite in WAL mode, `busy_timeout` set, single
+writer (the indexer). Full schema in §5.
+
+- Size is proportional to object count, not media size: ~0.5–1.5 KB/row.
+- `items` holds structured columns; `items_fts` is the inverted text index.
+- `meta` holds `schema_version`, last list token, last run timestamps.
+- Rebuilding into `library.db.tmp` then `rename()` gives an atomic catalog swap,
+  matching the `writeJsonAtomic` pattern already in `lib/common.js`.
+
+### 3.7 Serving: Caddy + Node API
+
+Caddy already runs on this host with internal TLS and split-DNS hostnames. Add
+one site block:
+
+```caddyfile
+photos.home.local {
+    root * /home/darwin/Code/b2-indexer/dist
+
+    handle /api/* {
+        reverse_proxy localhost:8090
+    }
+    handle {
+        file_server
+        encode gzip
+    }
+
+    # optional for LAN access; omit when bound to Tailscale only
+    basic_auth {
+        darwin $2a$14$...
+    }
+
+    tls internal
+}
+```
+
+- dnsmasq entry in `/etc/dnsmasq.d/internal.conf`, following the existing
+  convention (map the name to `100.81.195.27` for Tailscale; LAN clients can use
+  `192.168.0.4`).
+- The API is a single Node process with `better-sqlite3` (synchronous, one
+  query per request, no pool). Expose four read endpoints:
+
+```
+GET /api/timeline?year=&cursor=
+GET /api/search?q=&from=&to=&album=&type=&cursor=
 GET /api/albums
-GET /api/items/{id}
-GET /api/items/{id}/download   -> 302 to short-TTL B2 URL
-GET /api/items/{id}/stream     -> 302 to short-TTL B2 URL (range-capable)
-POST /api/items/presign        -> batch presign (bounded count)
+GET /api/items/:id/stream   -> 302 to short-TTL B2 presigned URL
 ```
 
-- **Keyset pagination** on `(taken_at DESC, item_id)`; never `OFFSET` at scale.
-- Cache album/timeline responses; cache the serving DB handle across invocations.
-- Rate-limit at API Gateway; cap batch presign size.
-- Return only metadata + thumbnail URL; fetch originals on demand.
+- Keyset pagination on `(taken_at DESC, id)`, never `OFFSET` at depth.
+- Static SPA and thumbnails come from `file_server`; the API returns metadata
+  and a signed media URL only.
 
-**Auth**
+### 3.8 Media delivery
 
-- SPA on CloudFront: CloudFront Function (or Lambda@Edge) checking a signed
-  session cookie or basic auth. Credentials in CloudFront KeyValueStore/Secrets
-  Manager, not in source. For a single user this is enough.
-- API: API Gateway authorizer — a shared bearer token from Secrets Manager for
-  single-user, or a Cognito JWT authorizer for multiple users
-  (Cognito free tier: 50k MAU).
-- If you already use Cloudflare, **Cloudflare Access** in front of everything is
-  the least-effort option (free for small teams) and also gives free B2 egress
-  via the Bandwidth Alliance.
-- Do **not** rely on S3 static website auth. It does not exist.
-
-### 4.7 Media delivery
-
-Priority order:
-
-1. **B2 direct with short-TTL presigned URLs** (S3-compatible presign or B2
-   download authorization). Cheapest, no AWS egress. B2 supports range
-   requests, so video seeking works.
-2. **B2 behind a Bandwidth Alliance CDN** (Cloudflare, bunny.net, Fastly) for
-   unlimited free B2 egress if you expect heavy traffic.
-3. **CloudFront in front of B2** only if you need AWS-native auth/WAF/logging.
-   Note: CloudFront pulling from B2 still consumes B2 egress (free within 3×),
-   and you lose B2's cache-friendly free path. Prefer direct/presigned unless
-   you need CloudFront features.
-
-Details:
-
-- Presign TTL: 5–15 minutes, per request. Do not emit month-long tokens.
-- For video, redirect (`302`) to B2 rather than proxying bytes through Lambda;
-  proxying destroys cost and concurrency.
-- Thumbnails are also private; presign them or serve via a short-TTL token. If
-  you want CloudFront caching, use a Lambda@Edge/CloudFront Function that
-  validates a session cookie and rewrites to a presigned origin URL — otherwise
-  every unique signature busts the cache.
-- Unsupported codecs: detect with `ffprobe`; optionally generate an H.264/AAC
-  MP4 proxy in `_derived/` **on demand or on a schedule**, never for the whole
+- **Thumbnails**: local disk via Caddy. Instant on LAN, zero egress.
+- **Originals/video**: `302` redirect to a B2 presigned URL (5–15 min TTL,
+  per request). The browser pulls bytes straight from B2; the home uplink is not
+  in the path.
+  - Consequence: LAN playback still traverses the WAN to B2. That is the price
+    of not storing 100 TB locally. B2 supports range requests, so seeking works.
+  - Do **not** proxy media through Node/Caddy: it saturates the home uplink and
+    ties up the process.
+- Unsupported codecs: detect with `ffprobe`; offer download fallback; optionally
+  generate an H.264 proxy on demand into `_derived/`. Never transcode the whole
   library by default.
 
-### 4.8 Web app
+### 3.9 Web app
 
-- SPA (React/Vue/Svelte) hosted on private S3 + CloudFront.
+- SPA (React/Vue/Svelte) in `dist/`, served by Caddy.
 - Views: timeline (infinite scroll, grouped by month), albums, search, item
   detail/lightbox, video player, download.
-- Thumbnails: lazy-loaded, `srcset` for grid vs preview, `loading="lazy"`,
-  content-visibility for long timelines.
-- Search: debounce 250–300ms; cancel in-flight requests; show skeletons.
+- Thumbnails: lazy-loaded, `srcset`, `loading="lazy"`, content-visibility for
+  long timelines.
+- Search: debounce 250–300 ms, cancel in-flight requests, show skeletons.
 - Offline/PWA optional.
 
-### 4.9 Request flows
+### 3.10 Request flows
 
 **Upload → visible**
 
 ```
-user/rclone uploads to B2 media/…
-  → B2 ObjectCreated event → webhook (200 in <3s) → SQS
-  → worker: ffprobe/exif → thumbnail to B2 _derived/
-  → metadata row to S3 raw/ Parquet
-  → catalog compaction (daily) → serving DB rebuild (daily/on-demand)
-  → SPA sees it on next catalog version (or optimistically via a "recent" index)
+rclone uploads to B2 media/…
+  → next polling run sees a new fileId
+  → status='listed' → derive: download, EXIF/ffprobe, thumbnail
+  → upsert row, status='derived'
+  → next UI query sees it (no rebuild needed for row changes)
 ```
 
 **Browse/search**
 
 ```
-SPA → CloudFront (auth) → GET /api/timeline or /api/search
-  → Lambda (serving DB in /tmp) → JSON (metadata + item ids)
-  → browser requests thumbnails → presigned B2 URLs
-  → user opens item → GET /api/items/{id}/stream → 302 → B2 (range)
+browser → Caddy (auth) → GET /api/timeline or /api/search
+  → server.js → SQLite index lookup → JSON (metadata + item ids)
+  → browser requests thumbnails → Caddy file_server (local disk)
+  → open item → GET /api/items/:id/stream → 302 → B2 (range-capable)
 ```
 
 **Delete/rename**
 
 ```
-B2 ObjectDeleted/HideMarker event (or reconciliation diff)
-  → worker writes tombstone to raw Parquet (deleted_at, event_id)
-  → catalog compaction drops/updates the row
-  → serving DB rebuild removes it
+B2 object disappears (or fileId changes)
+  → diff marks status='deleted', deleted_at=now
+  → queries filter deleted_at IS NULL
+  → compaction prunes tombstones per retention policy
+```
+
+---
+
+## 4. Current-Flow Clarification
+
+A frequent point of confusion, stated explicitly:
+
+| Question | Answer |
+|---|---|
+| Does indexing download the original? | Yes, once, for EXIF/thumbnails. Streamed and discarded. |
+| Does it upload the original back to B2? | **No.** It is already there. |
+| Where does the metadata row go? | `data/library.db` (local SQLite). |
+| Where does the thumbnail go? | `dist/thumbs/` (local), optionally mirrored to B2 `_derived/`. |
+| What does the web server read? | SQLite rows + local thumbnails. |
+| What does the browser fetch for full-res? | Directly from B2 via a presigned URL. |
+
+```
+B2 originals (untouched)
+   │  list (free) ──► diff vs library.db ──► only new/changed
+   │  download (streamed, once)
+   ▼
+sharp / ffprobe ──► metadata ──► UPSERT items (local SQLite)
+                └─► thumbnail ──► dist/thumbs/ (or B2 _derived/, optional)
 ```
 
 ---
 
 ## 5. Data Model
 
-One row per object version (latest version = current item). Stable keys matter.
+One row per current object. Stable keys matter.
 
-| Column | Type | Notes |
-|---|---|---|
-| `item_id` | string | `sha1(bucket + ":" + fileId)` or B2 `fileId`; stable per version |
-| `bucket` | string | source bucket |
-| `object_key` | string | full B2 object name |
-| `file_id` | string | B2 fileId (version-unique) |
-| `version_id` | string | B2 version |
-| `content_sha1` | string | exact dedupe key |
-| `content_type` | string | from B2 or sniffed |
-| `size_bytes` | int64 | |
-| `media_type` | enum | `image` / `video` / `audio` / `other` |
-| `uploaded_at` | timestamp | B2 upload timestamp |
-| `taken_at` | timestamp | EXIF `DateTimeOriginal` / video creation_time / ID3; fallback `uploaded_at` |
-| `taken_at_source` | enum | `exif` / `video` / `id3` / `filename` / `upload` |
-| `album` | string | derived from first path segment |
-| `path_segments` | list<string> | for folder browsing |
-| `width`, `height` | int | |
-| `duration_ms` | int64 | video/audio |
-| `camera_make`, `camera_model`, `lens` | string | EXIF |
-| `iso`, `f_number`, `exposure_time`, `focal_length` | double | EXIF |
-| `gps_lat`, `gps_lon` | double | EXIF; consider privacy toggle |
-| `orientation` | int | EXIF |
-| `thumb_key`, `preview_key`, `poster_key` | string | B2 `_derived/` keys |
-| `phash` | string | optional perceptual hash |
-| `tags` | list<string> | user/auto |
-| `ocr_text`, `transcript` | string | optional, lazy ML |
-| `indexed_at`, `updated_at` | timestamp | |
-| `deleted_at` | timestamp | tombstone |
-| `event_id` | string | last event that produced this row |
+### 5.1 `items`
 
-**Dedupe:** exact = `content_sha1`; near-dupe = `phash` Hamming distance. Keep a
-`duplicate_of` pointer rather than deleting, so storage can be reclaimed later.
+```sql
+CREATE TABLE items (
+  id            INTEGER PRIMARY KEY,
+  item_id       TEXT UNIQUE NOT NULL,   -- sha1(bucket + ':' + file_id)
+  bucket        TEXT NOT NULL,
+  object_key    TEXT UNIQUE NOT NULL,   -- full B2 object name
+  file_id       TEXT NOT NULL,          -- B2 fileId (version-unique)
+  content_sha1  TEXT,                   -- exact dedupe key
+  content_type  TEXT,
+  size_bytes    INTEGER,
+  media_type    TEXT NOT NULL,          -- image | video | audio | other
+  uploaded_at   INTEGER,                -- unix seconds
+  taken_at      INTEGER,                -- EXIF/video/ID3, fallback uploaded_at
+  taken_at_source TEXT,                 -- exif | video | id3 | filename | upload
+  album         TEXT,                   -- first path segment
+  path_segments TEXT,                   -- JSON array for folder browsing
+  width         INTEGER,
+  height        INTEGER,
+  duration_ms   INTEGER,
+  camera_make   TEXT,
+  camera_model  TEXT,
+  lens          TEXT,
+  iso           REAL,
+  f_number      REAL,
+  exposure_time REAL,
+  focal_length  REAL,
+  gps_lat       REAL,
+  gps_lon       REAL,
+  orientation   INTEGER,
+  thumb_key     TEXT,                   -- relative path under dist/thumbs/
+  preview_key   TEXT,
+  poster_key    TEXT,
+  phash         TEXT,                   -- optional perceptual hash
+  status        TEXT NOT NULL DEFAULT 'listed',
+  indexed_at    INTEGER,
+  updated_at    INTEGER,
+  deleted_at    INTEGER
+);
 
----
+CREATE INDEX items_timeline ON items(taken_at DESC, id DESC)
+  WHERE deleted_at IS NULL;
+CREATE INDEX items_album ON items(album, taken_at DESC)
+  WHERE deleted_at IS NULL;
+CREATE INDEX items_type ON items(media_type, taken_at DESC)
+  WHERE deleted_at IS NULL;
+CREATE INDEX items_camera ON items(camera_make, camera_model);
+CREATE INDEX items_sha1 ON items(content_sha1);
+```
 
-## 6. Cost Model
+### 5.2 `items_fts` (external-content FTS5)
 
-List prices, USD, late 2026. Treat as planning estimates, not quotes; verify
-before committing. Assumptions:
+```sql
+CREATE VIRTUAL TABLE items_fts USING fts5(
+  object_key, album, tags, ocr_text, transcript,
+  content='items', content_rowid='id',
+  tokenize='unicode61 remove_diacritics 2'
+);
+```
 
-- Originals stay in **B2** at **$6.95/TB-month** (some B2 docs quote
-  $0.005/GB ≈ $5/TB; use ~$7/TB to be safe).
-- Derivatives: 2 thumbnails × ~30 KB = **60 KB/item**, in B2.
-- Catalog Parquet: **~0.3 KB/item** in S3 Standard ($0.023/GB-month).
-- Serving DB: **~1 KB/item**, stored in S3; loaded into Lambda `/tmp`.
-- Athena **$5/TB scanned**, 10 MB minimum per query; ~2,000 searches/month.
-  (Most searches should hit the serving index, so this is a generous ceiling.)
-- Lambda free tier: 1M requests + 400k GB-s/month.
-- API Gateway HTTP API: **$1.00/M requests**.
-- CloudFront: **Free plan** ($0, 100 GB + 1M req/month) or **Pro plan** ($15,
-  50 TB + 10M req/month). Pay-as-you-go is ~$0.085/GB; avoid unless you need it.
-- Glue: effectively $0 with **partition projection** (one table object). Glue
-  bills per catalog object, not per row.
-- No NAT Gateway (keep Lambdas outside a VPC; S3/B2 over public endpoints).
-- B2 egress: free up to 3× average stored per month, then $0.01/GB.
+- `content='items'` avoids duplicating text; the FTS table is only the index.
+- Because `items` does not itself carry `tags`/`ocr_text` in the sketch above,
+  either add those columns to `items` or use a separate `item_text` table joined
+  to the FTS index. Pick one; keep it consistent.
+- Keep in sync with triggers for incremental changes, or run a `'rebuild'` after
+  each batch (simple, and fast enough for batch indexing).
+- Run `INSERT INTO items_fts(items_fts) VALUES('optimize')` after large batches
+  to merge index segments.
+- Tokenizer choice: `unicode61` is exact-token; add `porter` for English
+  stemming, or `trigram` if typo/substring search is required (larger index).
 
-| Line item | 100k items / 1 TB | 1M items / 10 TB | 10M items / 100 TB |
-|---|---:|---:|---:|
-| B2 originals | $6.95 | $69.50 | $695.00 |
-| B2 derivatives (60 KB/item) | $0.04 | $0.42 | $4.17 |
-| S3 catalog Parquet | $0.001 | $0.007 | $0.07 |
-| Glue (partition projection) | $0.00 | $0.00 | $0.00 |
-| Athena (2k queries) | $0.20 | $0.50 | $2.00 |
-| Lambda + API Gateway | $0.10 | $1.00 | $5.00 |
-| CloudFront | $0 (Free) | $15 (Pro) | $15 (Pro) |
-| **Total (approx.)** | **~$7.30** | **~$86** | **~$721** |
-| **AWS/CDN portion only** | **~$0.30** | **~$16.50** | **~$22** |
+### 5.3 `albums`, `tags`, `meta`
 
-**Takeaways**
+```sql
+CREATE TABLE albums (
+  album     TEXT PRIMARY KEY,
+  item_count INTEGER NOT NULL DEFAULT 0,
+  cover_item_id TEXT,
+  updated_at INTEGER
+);
 
-- Storage dominates. Optimize bytes (dedupe, derivative sizes, lifecycle), not
-  Lambda.
-- The control plane is noise *if* you avoid: NAT Gateway (~$32+/mo + data),
-  Firehose, OpenSearch (~$25+/mo minimum), Aurora Serverless (~$44+/mo minimum),
-  Glue crawlers, and S3 media egress.
-- **Comparison:** putting the same 10 TB of originals in S3 Standard is ~$230/mo
-  before egress; S3 Deep Archive is ~$10/mo but unusable for browsing
-  (hours to restore, retrieval fees). B2 at ~$70/mo for always-hot data is the
-  right trade-off. S3 Glacier is for a *second* archival copy, not the app.
-- **Cost guards:** AWS Budgets alerts; Athena workgroup per-query scan limit;
-  S3 lifecycle to expire `raw/` after it is compacted (optional); CloudWatch
-  billing alarm; no NAT; no idle databases.
+CREATE TABLE tags (
+  item_id TEXT NOT NULL,
+  tag     TEXT NOT NULL,
+  PRIMARY KEY (item_id, tag)
+);
 
----
+CREATE TABLE meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT
+);
+-- schema_version, last_list_token, last_index_at, last_derive_at
+```
 
-## 7. Scaling Thresholds and Options
+### 5.4 Dedupe
 
-| Scale | Recommendation | Why |
-|---|---|---|
-| **≤ 100k items** | Fully static SPA + client-side search (SQLite-WASM / DuckDB-WASM over compact JSON/Parquet shards) + B2 presign. No API, no Lambda. | Cheapest, simplest, reuses current static approach. |
-| **100k – 3M** | Static SPA + **Lambda search API over sharded SQLite FTS5**. Athena for analytics. | Fast search, cheap, no idle DB. |
-| **3M – 10M** | Shard serving DB by year/album; or move to Postgres (small VPS) / Aurora Serverless v2. Consider Iceberg for the lake. | SQLite cold-load and rebuild time grows. |
-| **> 10M / multi-user** | Managed Postgres + OpenSearch/Meilisearch; consider partitioning by user/tenant. | Full-text + concurrency + row-level updates. |
-
-**When to add Athena to the UI:** almost never. Add an "advanced/export" page
-that runs a bounded Athena query with a workgroup scan limit and caches results.
-Label it as slow.
-
-**When to add ML enrichment:** after the library is browsable. Face clustering,
-OCR, labels, and transcripts are the Google-Photos "magic" but are optional,
-embarrassingly parallel, and best batched. Keep them as a separate derived
-dataset joined by `item_id`, so the core pipeline stays cheap and simple.
-
----
-
-## 8. Alternatives Considered
-
-| Option | Query latency | Idle cost | Ops | Verdict |
-|---|---|---|---|---|
-| **Static SPA + client search** | fast (local) | ~$0 | low | Best ≤100k; index download grows |
-| **Lambda + sharded SQLite FTS5** (recommended) | ~50–300 ms | ~$0–5 | medium | Best 100k–3M; rebuild + cold-load |
-| **Lambda + DuckDB over Parquet** | ~0.5–3 s | ~$0–5 | low-medium | No separate index build; slower FTS |
-| **API + Athena** | 1–5 s+ | ~$0 | low | Good analytics; poor UX/bill at keystroke |
-| **DynamoDB** | single-digit ms | ~$0.25/GB-mo + reads | low | Great key/value; weak full-text and date-range UX without GSIs |
-| **OpenSearch / Meilisearch** | ms | $25+/mo or VPS | high | Only for heavy search / many users |
-| **Aurora Serverless v2 / RDS** | ms | ~$44+/mo minimum | medium | Overkill solo; good multi-user |
-| **VPS + Postgres + Meilisearch** | ms | ~$6–12/mo | medium | Cheapest "real DB"; not AWS-native |
-| **Firehose + Parquet conversion** | n/a | per-GB | medium | Drop; batch is cheaper/simpler |
-
-**Decision:** build the lake (Parquet + Athena) because it is portable and cheap
-to keep forever, but serve the app from a SQLite/DuckDB serving index. This
-gives Google-Photos-like UX without a Google-Photos-like bill.
+- Exact: `content_sha1` (free from B2 listing).
+- Near-dupe: optional `phash` Hamming distance.
+- Keep a `duplicate_of` pointer rather than deleting; reclaim storage later,
+  after review.
 
 ---
 
-## 9. Implementation Plan
+## 6. Search: How FTS5 Actually Answers "gopro"
 
-Infrastructure as code: **AWS SAM** (simplest for Lambda/API/SQS) or **AWS CDK
-TypeScript**. Keep it in `infra/`. Do not hand-build the stack in the console.
+This section exists because it is the most counter-intuitive part.
 
-### Phase 0 — Foundations (1–2 days)
+- SQLite's normal B-tree indexes handle `=`, ranges, and prefixes. They cannot
+  answer `LIKE '%gopro%'` without scanning every row.
+- FTS5 maintains an **inverted index**: token → row ids. `MATCH 'gopro'` is a
+  dictionary lookup, not a scan.
+- The "scan everything" cost is paid **once at index time**, during
+  `'rebuild'` / incremental inserts. At query time it is a lookup.
+- Scope matters: FTS covers **text** (filename, album, tags, OCR, transcript).
+  It does not understand pixels. "Photos *taken with* a GoPro" is an EXIF column
+  query (`camera_make = 'GoPro'`); "photos *of* a GoPro" needs ML labels that
+  are then indexed as text.
+- Prefix search works (`gopro*`); typos and mid-word substrings do not, unless
+  the `trigram` tokenizer is used.
 
-- [ ] Extract shared B2 logic into `lib/b2.js` (S3-compatible `ListObjectsV2`
-      pagination, download stream, presign, key scoping). Keep the native B2
-      client only for `downloadFileById` if convenient.
-- [ ] Define stable IDs (`item_id = fileId`), dedupe keys (`contentSha1`), and
-      reserved prefixes (`_derived/`, `_index/`).
-- [ ] Add a state store: SQLite locally for the CLI; DynamoDB table
-      (`item_id`, `etag`, `indexed_at`, `status`) for the cloud worker.
-- [ ] Add `EXIF` extraction (`exiftool-vendored` or `sharp` metadata) and
-      `ffprobe` parsing helpers in `lib/media.js`.
-- [ ] Define the metadata schema in `lib/schema.js` and a version field.
+### 6.1 Measured reality (this host, 2026-11-06)
 
-**Acceptance:** a dry run indexes 1k objects, extracts metadata, and produces
-valid rows without re-downloading unchanged objects.
+Synthetic 1,000,000-row database, 90 MB (structured) / 120 MB (with FTS):
 
-### Phase 1 — Incremental index + Parquet lake (3–5 days)
+| Query | Plan / mechanism | Time |
+|---|---|---:|
+| `SELECT count(*)` | full count | ~2–7 ms |
+| Keyset timeline page (50 rows) | index range scan | **~2 ms** |
+| Album filter (5,000 rows) | index lookup | ~2 ms |
+| Deep `OFFSET 900000` (wrong way) | walk + discard | ~353 ms |
+| Full scan `GROUP BY media_type` | read all 1M rows | ~248 ms |
+| `LIKE '%gopro%'` | full scan | ~95 ms |
+| `MATCH 'gopro'` (FTS5) | inverted index | **~2 ms** |
+| `MATCH 'gopro'` + join + page of 20 | index + 20 row reads | **~5 ms** |
 
-- [ ] Replace the full `index.js` scan with an incremental diff against the
-      state store (upload timestamp/fileId watermarks).
-- [ ] Write append-only Parquet to `s3://…/raw/ingest_date=…/` in batches
-      (Node `parquetjs-lite` or a DuckDB/pyarrow step).
-- [ ] Add daily compaction → `s3://…/catalog/year=/month=/…` sorted by
-      `taken_at`; target 128–512 MB files.
-- [ ] Add Athena DDL with **partition projection**; document sample queries.
-- [ ] Add `npm run backfill`, `npm run compact`, `npm run verify` scripts.
+Takeaways:
 
-**Acceptance:** a 100k-object backfill produces a compacted catalog; Athena
-returns timeline counts in <5s; no duplicate rows on re-run.
+- Even the worst query over 1M rows is sub-second; the normal path is
+  single-digit milliseconds.
+- `LIKE` grows linearly with row count (~2.4 s at 25M rows); FTS stays flat.
+- Deep `OFFSET` is the one query pattern to ban; keyset pagination is 100×+
+  faster.
 
-### Phase 2 — Derivatives (3–5 days)
+---
 
-- [ ] Split `thumbs.js` into `lib/derive.js`; add image grid + preview, video
-      poster, audio art; write to B2 `_derived/`.
-- [ ] Idempotent by `item_id` + derivative spec; skip if the derivative exists
-      and the source hash matches.
-- [ ] Concurrency via `p-limit`; for large backfills, run as an ECS Fargate/
-      Batch job (spot) or on the home server, not a single CLI process.
-- [ ] Handle unsupported formats and corrupt files without failing the batch.
+## 7. Scaling Thresholds
 
-**Acceptance:** derivatives for 10k mixed items; re-run creates zero duplicates;
-failures land in a retry list.
-
-### Phase 3 — Event-driven ingestion (3–5 days)
-
-- [ ] Enable B2 Event Notifications (support request) and create rules for
-      `media/` create/delete/hide with an HMAC secret.
-- [ ] Build API Gateway + webhook Lambda: verify signature, dedupe `eventId`,
-      enqueue to SQS, return 200 <3s.
-- [ ] Build SQS → worker (Lambda container image with `ffmpeg`/`sharp`/SQLite)
-      with DLQ, partial batch failure, and idempotent upserts.
-- [ ] Build the nightly reconciliation Lambda (S3-compatible list + diff).
-- [ ] CloudWatch alarms: webhook 5xx, DLQ depth, reconciliation drift,
-      derive failures.
-
-**Acceptance:** upload a photo → it appears in the catalog within minutes;
-delete it → it tombstones; kill the worker mid-batch → retries succeed; a
-reconciliation run reports zero unexplained drift.
-
-### Phase 4 — Serving index + API (5–8 days)
-
-- [ ] `build_catalog.js`: Parquet → SQLite FTS5 (`items`, `albums`, `tags`,
-      `items_fts`), sharded by year; upload `serving/catalog-<ver>.db`.
-- [ ] Lambda container API: load DB from S3 by ETag, keyset pagination,
-      `/search`, `/timeline`, `/albums`, `/items`, `/presign`, redirect endpoints.
-- [ ] API Gateway HTTP API + authorizer; throttling; CORS.
-- [ ] Presign B2 URLs (S3 SigV4 or B2 download authorization), short TTL.
-- [ ] Contract tests with fixtures; load test at expected concurrency.
-
-**Acceptance:** p95 `/search` < 300 ms warm, < 1.5 s cold; correct pagination;
-no full-bucket scans per request; presigned URL expires and refreshes.
-
-### Phase 5 — Web app + auth + edge (5–8 days)
-
-- [ ] SPA with timeline, albums, search, lightbox, video, download.
-- [ ] Private S3 + CloudFront (OAC); CloudFront Function/Lambda@Edge auth;
-      or Cloudflare Access.
-- [ ] Caching: hashed assets immutable; HTML short TTL; API no-store.
-- [ ] Accessibility, keyboard nav, mobile layout, error/empty states.
-
-**Acceptance:** authenticated browse on mobile and desktop; unauthenticated
-requests get 401; thumbnails load lazily; video seeks via range requests.
-
-### Phase 6 — Optional / later
-
-- [ ] Athena saved queries / admin dashboard.
-- [ ] ML enrichment: Rekognition labels/faces, OCR, transcripts (batch, opt-in).
-- [ ] Iceberg migration if row-level updates become painful.
-- [ ] Duplicate reclamation (delete `duplicate_of` originals after review).
-- [ ] On-demand H.264 proxy generation for unsupported codecs.
-
-### Repo changes summary
-
-| Current | Fate |
+| Scale | Recommendation |
 |---|---|
-| `index.js` | Rewrite as incremental backfill/reconcile; move logic to `lib/b2.js` |
-| `thumbs.js` | Split into `lib/derive.js`; keep CLI wrapper for local runs |
-| `download_links.js` | Replace with per-request presign in the API; keep a CLI for exports |
-| `generate_albums.js` | Fold into catalog build (albums are a query, not a file) |
-| `generate_site.js` / `generate_site_albums.js` | Keep as a static fallback/exporter; primary UI becomes the SPA |
-| `lib/common.js` | Split into `lib/config.js`, `lib/b2.js`, `lib/media.js`, `lib/schema.js` |
-| `dist/` | Becomes local build output only; canonical data is S3 + B2 |
+| **≤ 100k items** | Current setup is overkill-free. SQLite + FTS + Caddy. Optional: fully static export. |
+| **100k – 3M** | Home-server SQLite is the sweet spot. Consider sharding FTS by year if rebuild time grows. |
+| **3M – 10M** | Shard the catalog by year/album into several `.db` files; or move row storage to Postgres on a VPS. Watch SSD capacity for thumbnails. |
+| **> 10M / multi-user / public** | Postgres + Meilisearch/OpenSearch; or the AWS reference architecture (Appendix A). |
+
+**When to move off SQLite (concrete triggers):**
+
+1. DB exceeds ~50–80 GB or rebuilds exceed the maintenance window.
+2. Concurrent writers appear (multi-user uploads).
+3. Typo-tolerant/fuzzy search is required at scale (use Meilisearch).
+4. Analytics over all rows becomes routine (use DuckDB/Parquet, Appendix B).
+5. Availability must exceed this one box (move to AWS/VPS).
+
+**When to add Athena:** almost never. Keep Parquet + DuckDB locally for
+analytics; export to S3 only if you want offsite/portable archives.
 
 ---
 
-## 10. Operations Runbook
+## 8. Operations
 
-**Daily**
+### 8.1 Scheduled jobs (systemd timers)
 
-- Reconciliation diff; report drift (should be 0).
-- Compaction if new raw batches exist; rebuild serving DB if catalog changed.
-- Check DLQ depth, derive failure count, webhook error rate.
+| Job | Cadence | Purpose |
+|---|---|---|
+| `b2-indexer-index` | 15–60 min | List + diff + enqueue; nightly full re-list |
+| `b2-indexer-derive` | after index / nightly | Process `status='listed'` and `failed` |
+| `b2-indexer-compact` | nightly/weekly | FTS `optimize`, tombstone prune, album counts |
+| `library.db` backup | daily | `sqlite3 .backup` to a dated file |
 
-**Weekly**
+Notes:
 
-- Verify a sample of presigned downloads and thumbnail renders.
-- Check B2 storage growth vs. dedupe ratio.
-- Review AWS Cost Explorer for surprise line items (NAT, egress, Athena scans).
+- Overlap must be prevented: timers must not start a second writer. Use a lock
+  file or `flock`.
+- Keep runs inside a bandwidth/time window for large backfills.
+- `sqlite3 .backup` is safe online (unlike copying a live WAL file). Consider
+  Litestream if continuous replication to B2/S3 is wanted.
 
-**On failure**
+### 8.2 Daily / weekly checks
+
+- Drift: objects in B2 vs rows in `items` (should be 0 unexplained).
+- Derive failures list and retry count.
+- `library.db` size growth vs item growth.
+- Backups exist and restore.
+
+### 8.3 Failure modes
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| New uploads not appearing | Event rule suspended / webhook 5xx | Check B2 rule status + CloudWatch; run reconciliation |
-| Duplicate timeline entries | Replay not idempotent | Dedupe by `item_id`/`event_id`; rebuild catalog |
-| Thumbnails missing | Worker timeout on large video | Increase memory/timeout; use Fargate for big files |
-| Search stale | Serving DB not rebuilt | Trigger catalog build; verify version/ETag |
-| Bill spike | Egress or Athena scan | Check CloudFront/S3 egress; set workgroup scan limit |
-| Presigned 403 | Clock skew / key scope | Verify key capabilities and TTL |
+| New uploads not appearing | polling timer failed / lock stuck | Check timer logs; run index manually |
+| Duplicate timeline entries | non-idempotent upsert | Dedupe by `item_id`/`object_key`; rebuild |
+| Thumbnails missing | ffmpeg/sharp failure on a large file | Retry list; cap size; inspect log |
+| Search stale | FTS not rebuilt after batch | Rebuild FTS; verify `optimize` ran |
+| API slow | `OFFSET` pagination or missing index | Use keyset; check `EXPLAIN QUERY PLAN` |
+| Presigned 403 | clock skew / key scope / TTL | Check NTP, key capabilities, TTL |
+| Disk full | thumbnails exceeded SSD budget | Move derivatives to B2 `_derived/` |
 
-**Disaster recovery**
+### 8.4 Disaster recovery
 
-- Metadata is derivable from B2 by full re-list (free Class C) + re-derive.
-  Keep the Parquet lake as a fast rebuild source.
-- Keep B2 application keys in a password manager/Secrets Manager.
-- Export `catalog.db` periodically for offline use.
-- Document the "rebuild from scratch" path: list → derive → compact → serve.
+- Metadata is derivable: full re-list (free) + re-derive.
+- Prefer keeping the Parquet/JSON export so a rebuild can skip re-download.
+- Keep B2 keys in a password manager; never commit `.env`.
+- Documented rebuild path: `index → derive → compact → serve`.
+- If thumbnails are local-only, a server loss means re-deriving every thumbnail
+  (a full re-download). Mirroring to B2 `_derived/` trades storage for a much
+  shorter recovery.
 
 ---
 
-## 11. Security and Privacy
+## 9. Security and Privacy
 
 - **Buckets private.** No public ACLs. Presigned URLs only.
-- **Least-privilege B2 keys**, scoped by bucket and capability; rotate.
-- **Webhook hardening:** HMAC verification, timestamp/replay window,
-  constant-time compare, SQS buffer, API Gateway throttling/WAF.
-- **Auth:** CloudFront Function/signed cookie or Cloudflare Access for the SPA;
-  Cognito/JWT or bearer token for the API. No shared long-lived download tokens.
-- **Secrets:** Secrets Manager/SSM; never commit `.env`; never put secrets in
-  Lambda env plaintext or client code.
-- **Encryption:** TLS everywhere; B2 SSE-B2 and S3 SSE-S3 at rest.
-- **PII:** EXIF GPS is sensitive. Default to hiding precise GPS in the UI; expose
-  a coarse location only on explicit request.
-- **Abuse:** rate-limit search and presign; cap batch sizes; monitor egress.
-- **Audit:** CloudTrail for AWS; B2 event logs for object changes.
+- **Least-privilege B2 keys**, scoped by bucket/capability; rotate.
+- **Network exposure:** default to Tailscale-only. If LAN access is needed, add
+  `basic_auth` in Caddy. Do not port-forward.
+- **Auth:** one Caddy `basic_auth` block is enough for a single user. Avoid
+  long-lived download tokens; presign per request with a short TTL.
+- **Secrets:** in `.env` on the host or a password manager; never in the repo,
+  never in client code.
+- **Encryption:** TLS everywhere (Caddy internal CA; trust it on devices, or use
+  Tailscale certs); B2 SSE-B2 and S3 SSE-S3 at rest.
+- **PII:** EXIF GPS is sensitive. Default to hiding precise GPS in the UI;
+  expose coarse location only on explicit request.
+- **Abuse:** rate-limit `/api/search`; cap presign batch sizes; monitor egress.
+- **Backups:** the database contains filenames and GPS; treat backups as
+  sensitive.
 
 ---
 
-## 12. Risks and Open Questions
+## 10. Implementation Plan
+
+No infrastructure-as-code needed for the default path. One box, systemd timers,
+one Caddy block. Keep AWS/CDK out until Appendix A is actually triggered.
+
+### Phase 0 — Foundations (1–2 days)
+
+- [ ] Extract shared B2 logic into `lib/b2.js` (list pagination, download
+      stream, presign, key scoping). Keep `downloadFileById` where convenient.
+- [ ] Define stable IDs (`item_id = sha1(bucket:file_id)`), dedupe keys
+      (`contentSha1`), and reserved prefixes (`_derived/`, `_index/`).
+- [ ] Add `lib/db.js` (open/close, WAL, migrations via `meta.schema_version`).
+- [ ] Add `lib/schema.js` (DDL + version) and `lib/media.js`
+      (EXIF via `exiftool-vendored` or `sharp`; `ffprobe` parsing).
+- [ ] Replace `thumbKey()` path flattening with a collision-free hash.
+
+**Acceptance:** a dry run indexes 1k objects into `library.db`, extracts
+metadata, and a second run re-downloads zero unchanged objects.
+
+### Phase 1 — Incremental inventory (2–3 days)
+
+- [ ] Rewrite `index.js`: list → diff vs `items` → upsert `status='listed'`;
+      mark missing rows `status='deleted'`.
+- [ ] Add `npm run index:full` (ignore token) and `npm run index` (incremental).
+- [ ] Store `last_list_token` and run timestamps in `meta`.
+- [ ] Locking (`flock`) so timers never overlap.
+
+**Acceptance:** adding one object to B2 and running the job produces exactly one
+new row; deleting it produces a tombstone; re-running is a no-op.
+
+### Phase 2 — Derivatives (3–5 days)
+
+- [ ] Split `thumbs.js` into `lib/derive.js`; image grid + preview, video
+      poster, audio art.
+- [ ] Idempotent by `item_id` + derivative spec; skip when the source hash is
+      unchanged and the file exists.
+- [ ] `p-limit` concurrency; retry list for failures; do not fail the batch.
+- [ ] Decide derivative storage: local only, or mirror to B2 `_derived/`
+      (weigh 1 TB SSD budget).
+
+**Acceptance:** derivatives for 10k mixed items; a re-run creates zero
+duplicates; failures land in a retry list.
+
+### Phase 3 — Catalog + FTS (2–3 days)
+
+- [ ] Build `items_fts` (rebuild after batches, or triggers for incremental).
+- [ ] Add `albums` and `tags` population; album cover selection.
+- [ ] `compact.js`: FTS `optimize`, tombstone pruning, album counts.
+- [ ] Add `npm run catalog`, `npm run compact`, `npm run verify`.
+
+**Acceptance:** `MATCH 'gopro'` and camera-model queries return correct rows in
+single-digit ms on a 100k library; re-running catalog build is idempotent.
+
+### Phase 4 — API (3–4 days)
+
+- [ ] `server.js` with `better-sqlite3`; `/timeline`, `/search`, `/albums`,
+      `/items/:id/stream`.
+- [ ] Keyset pagination; input validation; rate limiting.
+- [ ] Presign B2 URLs (short TTL); `302` for originals/video.
+- [ ] Contract tests with fixtures.
+
+**Acceptance:** p95 `/search` < 100 ms on a 1M-row catalog; correct pagination;
+presigned URL expires and refreshes.
+
+### Phase 5 — Web app + Caddy (3–5 days)
+
+- [ ] SPA: timeline, albums, search, lightbox, video, download.
+- [ ] Caddy site block + dnsmasq entry; `basic_auth` or Tailscale-only.
+- [ ] Caching: hashed assets immutable; API `no-store`.
+- [ ] Mobile layout, keyboard nav, error/empty states.
+
+**Acceptance:** authenticated browse on desktop and phone over LAN and
+Tailscale; unauthenticated requests get 401; video seeks via range requests.
+
+### Phase 6 — Optional
+
+- [ ] Parquet export + DuckDB analytics (Appendix B).
+- [ ] Event-driven ingest via Tailscale Funnel (keep reconciliation).
+- [ ] ML enrichment: Rekognition labels/faces, OCR, transcripts (batch, opt-in).
+- [ ] Duplicate reclamation after review.
+- [ ] On-demand H.264 proxies for unsupported codecs.
+- [ ] AWS migration only if a §7 trigger is crossed (Appendix A).
+
+### 10.1 Repo changes summary
+
+| Current | Fate |
+|---|---|
+| `index.js` | Rewrite as incremental inventory; move logic to `lib/b2.js` |
+| `thumbs.js` | Split into `lib/derive.js`; keep a CLI wrapper |
+| `download_links.js` | Replace with per-request presign in the API; keep a CLI for exports |
+| `generate_albums.js` | Fold into the catalog build (albums are a query) |
+| `generate_site.js` / `generate_site_albums.js` | Keep as a static fallback/exporter; primary UI is the SPA |
+| `lib/common.js` | Split into `lib/config.js`, `lib/b2.js`, `lib/db.js`, `lib/media.js`, `lib/schema.js` |
+| `dist/` | Local build/cache output (thumbs, static app); not canonical |
+| `data/library.db` | New: canonical local catalog (rebuildable) |
+
+### 10.2 Dependencies to add
+
+- `better-sqlite3` (synchronous SQLite; native, Node 20+).
+- `exiftool-vendored` (or extend `sharp` metadata) for EXIF.
+- `ffprobe` via `child_process` (ffmpeg already required).
+- Optional: `duckdb` (Parquet export/analytics), `litestream` (backups).
+
+---
+
+## 11. Risks and Open Questions
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| B2 Event Notifications require support enablement and can be suspended | Missed ingests | Reconciliation is mandatory, not optional |
-| Webhook 3s timeout | Lost events if handler is slow | Enqueue only; do work async |
-| At-least-once delivery | Duplicates | Idempotent upserts by `item_id`/`eventId` |
-| Lambda 15-min limit | Large video processing fails | Fargate/Batch for files above a threshold |
-| SQLite cold-load at millions of rows | Slow first request | Shard by year/album; target <1–2 GB per shard |
-| Parquet small-file proliferation | Athena slow/costly | Daily compaction, 128–512 MB targets |
-| B2 3× egress cap | Overage $0.01/GB | Monitor; use a Bandwidth Alliance CDN for heavy video |
-| Format/codec diversity | Broken playback | Detect, show download fallback, optional proxies |
+| Home server down | Gallery unavailable | Accept for personal use; bytes safe in B2; DB rebuildable |
+| SSD capacity for thumbnails | Disk full at scale | Mirror derivatives to B2 `_derived/`; monitor |
+| Single-writer contention | Timer overlap / locked DB | `flock`, WAL, `busy_timeout` |
+| Long first backfill | Hours–days of download | Windowed runs, resumable `status`, newest-first |
+| FTS rebuild time grows | Long maintenance window | Incremental triggers; shard by year |
+| Unsupported codecs | Broken playback | Detect; download fallback; optional proxies |
+| LAN exposure | Unauthorized access | Tailscale-only or `basic_auth`; no port forward |
+| Presigned URL leakage | Temporary access | Short TTL; scope key to read/presign |
+| GPS privacy | Sensitive metadata exposed | Hide precise GPS by default |
 | Scope creep into ML | Cost/time sink | Phase 6, optional, separate pipeline |
-| Athena/Glue misuse | Surprise bills | Partition projection, scan limits, no per-keystroke queries |
 
 **Open questions for Darwin**
 
 1. **Expected object count and mix** (photos vs. video vs. audio)? This decides
-   whether SQLite is enough or a DB is needed sooner.
-2. **Single user or family/multi-user?** Affects auth choice (shared token vs.
-   Cognito) and concurrency.
+   whether SQLite is enough or sharding is needed at launch.
+2. **Single user or family/multi-user?** Affects auth and write concurrency.
 3. **Is B2 already populated, or is this a new bucket?** Determines backfill
-   strategy and whether `contentSha1` dedupe is available.
-4. **How important is instant search vs. "search on submit"?** Athena-only is
-   viable if 2–3s is acceptable.
-5. **Are event notifications enabled on the B2 account?** If not, start with
-   scheduled reconciliation.
-6. **Do you want to keep the current static HTML output** as an offline/export
-   mode, or replace it entirely?
+   scope and whether `contentSha1` dedupe is available.
+4. **Is search mostly filenames/albums, or EXIF/camera, or OCR/ML?** Determines
+   FTS tokenizer and whether ML is in scope.
+5. **LAN access, Tailscale-only, or both?** Determines Caddy auth.
+6. **Keep the current static HTML output** as an export, or replace it entirely
+   with the SPA?
 7. **Is transcoding required** for your video formats, or is download fallback
    acceptable?
+8. **Do you want derivatives mirrored to B2** (recovery) or local-only (simpler,
+   fits SSD)?
 
 ---
 
-## 13. Appendix
+## Appendix A — AWS Reference Architecture (escape hatch, not default)
 
-### A. Athena table sketch (partition projection)
+Use only if a §7 trigger is crossed: public/multi-user serving, availability
+beyond this box, or serverless batch execution.
 
-```sql
-CREATE EXTERNAL TABLE catalog (
-  item_id string, bucket string, object_key string, file_id string,
-  content_sha1 string, content_type string, size_bytes bigint,
-  media_type string, uploaded_at timestamp, taken_at timestamp,
-  width int, height int, duration_ms bigint,
-  camera_make string, camera_model string,
-  gps_lat double, gps_lon double,
-  album string, thumb_key string, preview_key string, poster_key string,
-  indexed_at timestamp, deleted_at timestamp
-)
-PARTITIONED BY (year string, month string)
-STORED AS PARQUET
-LOCATION 's3://<meta-bucket>/catalog/'
-TBLPROPERTIES (
-  'projection.enabled' = 'true',
-  'projection.year.type' = 'integer',
-  'projection.year.range' = '1990,2035',
-  'projection.month.type' = 'integer',
-  'projection.month.range' = '1,12',
-  'projection.month.digits' = '2',
-  'storage.location.template' = 's3://<meta-bucket>/catalog/year=${year}/month=${month}/'
-);
+```
+B2 (media, private)
+  │ B2 Event Notifications (webhook, needs support enablement)
+  ▼
+API Gateway → webhook Lambda (verify HMAC, 200 in <3s) → SQS (+DLQ)
+  → worker (Lambda container / Fargate): ffprobe, sharp, SQLite
+  → thumbnail to B2 _derived/
+  → metadata → S3 raw Parquet (ingest_date=…) → compacted catalog
+  → DynamoDB state (item_id, etag, indexed_at, status)
+  ▼
+Serving index: SQLite FTS5 in S3, loaded by API Lambda to /tmp
+  + Athena/Glue (partition projection) for ad-hoc analytics
+  ▼
+CloudFront (SPA + API + auth) → 302 to B2 presigned URLs
 ```
 
-### B. Serving DB sketch
+Key corrections retained from the earlier draft:
 
-```sql
-CREATE TABLE items (
-  item_id TEXT PRIMARY KEY, object_key TEXT, media_type TEXT,
-  taken_at INTEGER, uploaded_at INTEGER, album TEXT,
-  width INTEGER, height INTEGER, duration_ms INTEGER,
-  thumb_key TEXT, preview_key TEXT, poster_key TEXT,
-  size_bytes INTEGER, content_sha1 TEXT, deleted_at INTEGER
-);
-CREATE VIRTUAL TABLE items_fts USING fts5(
-  object_key, album, tags, ocr_text, transcript,
-  content='items', content_rowid='rowid'
-);
-CREATE INDEX items_timeline ON items(taken_at DESC, item_id);
-CREATE INDEX items_album ON items(album, taken_at DESC);
-```
+- Drop **Firehose**; write Parquet directly from a batch job.
+- Athena is **analytics only**, never the hot UI path.
+- "S3 static website + basic auth" does not exist; use CloudFront + auth
+  function, Cognito, or Cloudflare Access.
+- Never serve media through AWS; egress at ~$0.09/GB destroys the cost model.
+- Partition the lake by ingest date, compact a derived catalog by **capture**
+  month.
+- Mandatory reconciliation: events are at-least-once and can be suspended.
+- Derived artifacts must live in a separate bucket or reserved prefix to avoid
+  re-trigger loops.
 
-### C. Pricing sources (verify before committing)
+Cost guardrails if ever used: AWS Budgets alerts, Athena workgroup scan limit,
+no NAT Gateway (keep Lambdas outside a VPC), no idle Aurora/OpenSearch, S3
+lifecycle for compacted `raw/`.
 
-- Backblaze B2: https://www.backblaze.com/cloud-storage/pricing ($6.95/TB-mo,
-  free egress ≤3×, $0.01/GB beyond).
-- Backblaze transactions: https://www.backblaze.com/cloud-storage/transaction-pricing
-  (Class A/B/C free; Class D event notifications first 2,500/day free, then
-  $0.004/10k).
-- B2 Event Notifications: https://www.backblaze.com/docs/cloud-storage-event-notifications-reference-guide
-  (webhook only, HTTPS, 3s timeout, at-least-once, HMAC optional, feature
-  requires support enablement).
-- Amazon Athena: https://aws.amazon.com/athena/pricing/ ($5/TB scanned, 10 MB
-  minimum per query).
-- Athena partition projection: https://docs.aws.amazon.com/athena/latest/ug/partition-projection.html
-- AWS Lambda: https://aws.amazon.com/lambda/pricing/ (1M req + 400k GB-s free).
-- Amazon CloudFront: https://aws.amazon.com/cloudfront/pricing/ (flat-rate
-  plans: Free / Pro $15 / Business $200; pay-as-you-go also available).
-- Amazon S3: https://aws.amazon.com/s3/pricing/ (Standard $0.023/GB-mo;
-  Glacier IR ~$0.004/GB-mo; Deep Archive ~$0.00099/GB-mo + retrieval).
-- AWS Glue: https://aws.amazon.com/glue/pricing/ (Data Catalog billed per
-  object/partition; partition projection avoids per-partition cost).
+---
 
-### D. Glossary
+## Appendix B — Parquet + DuckDB Analytics (optional local)
+
+Keep the serving path in SQLite; use DuckDB when you need ad-hoc slicing over
+all rows.
+
+- Export `items` to Parquet: `COPY (SELECT * FROM items) TO 'catalog.parquet'`.
+- Or run DuckDB directly against exported Parquet for group-bys, camera
+  statistics, date histograms.
+- Parquet is portable and cheap to keep; copy to S3 only for offsite archive.
+- Do not put DuckDB in the per-request web path; rebuild/query it offline.
+
+---
+
+## Appendix C — Cost Model
+
+Assumptions: B2 originals $6.95/TB-month; derivatives ~60 KB/item in B2;
+local compute/disk already owned; AWS portion $0 by default.
+
+| Line item | 100k items / 1 TB | 1M items / 10 TB | 10M items / 100 TB |
+|---|---:|---:|---:|
+| B2 originals | $6.95 | $69.50 | $695.00 |
+| B2 derivatives (if mirrored) | $0.04 | $0.42 | $4.17 |
+| Home server (power/disk, already paid) | — | — | — |
+| Caddy / Node / SQLite | $0 | $0 | $0 |
+| **Total (approx.)** | **~$7.00** | **~$70** | **~$699** |
+
+Notes:
+
+- Storage dominates. Optimize bytes (dedupe, derivative sizes, lifecycle), not
+  compute.
+- B2 egress is free up to 3× average stored per month, then $0.01/GB. Heavy
+  video viewing across many friends could exceed that; a Bandwidth Alliance CDN
+  (Cloudflare, bunny.net, Fastly) makes B2 egress free.
+- Local SSD is the real hidden cost: at 10M items, thumbnails alone are ~600 GB.
+  Decide derivative storage explicitly.
+- Compare: 10 TB of originals in S3 Standard is ~$230/mo before egress; B2 at
+  ~$70/mo for always-hot data is the right trade-off.
+
+---
+
+## Appendix D — Glossary
 
 - **Derivative**: any generated artifact (thumbnail, preview, poster, proxy).
-- **Serving index**: the small, fast database the API reads (SQLite FTS5).
-- **Lake**: the durable Parquet datasets on S3.
+- **Serving index**: the local SQLite FTS5 database the API reads.
+- **Lake**: durable Parquet datasets (local or S3), used for analytics.
 - **Tombstone**: a row marking an item deleted, keeping history.
+- **Keyset pagination**: paging by `(taken_at, id)` cursor instead of `OFFSET`.
+- **Inverted index**: token → row-id map; what makes `MATCH` fast.
+- **Bandwidth Alliance**: CDN partners that peer with Backblaze, making B2
+  egress free.
 - **Partition projection**: Athena derives partition locations from table
-  properties instead of the Glue catalog.
-- **Bandwidth Alliance**: CDN partners that peer with Backblaze so B2 egress is
-  free.
+  properties instead of the catalog.
+
+---
+
+## Appendix E — Sources (verify before committing)
+
+- Backblaze B2 pricing: https://www.backblaze.com/cloud-storage/pricing
+- Backblaze transaction pricing: https://www.backblaze.com/cloud-storage/transaction-pricing
+- B2 Event Notifications reference: https://www.backblaze.com/docs/cloud-storage-event-notifications-reference-guide
+- SQLite FTS5: https://sqlite.org/fts5.html
+- SQLite limits: https://sqlite.org/limits.html
+- better-sqlite3: https://github.com/WiseLibs/better-sqlite3
+- Caddy reverse_proxy / file_server / basic_auth: https://caddyserver.com/docs/
+- AWS Athena pricing: https://aws.amazon.com/athena/pricing/
+- Athena partition projection: https://docs.aws.amazon.com/athena/latest/ug/partition-projection.html
+- Amazon S3 pricing: https://aws.amazon.com/s3/pricing/
+- Amazon CloudFront pricing: https://aws.amazon.com/cloudfront/pricing/
+- AWS Lambda pricing: https://aws.amazon.com/lambda/pricing/
