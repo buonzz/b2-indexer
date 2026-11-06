@@ -3,7 +3,7 @@ const fs = require('fs');
 const readline = require('readline');
 const path = require('path');
 
-require('dotenv').config()
+require('dotenv').config({ quiet: true })
 
 const b2 = new B2({
     applicationKeyId: process.env.APPLICATION_KEY_ID,

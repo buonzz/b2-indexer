@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const json = require('big-json');
 
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 
 const albumsFile = path.join(__dirname, 'dist/' + 'albums.json');
 const OUTPUT_FOLDER = path.join(__dirname, 'dist/'); // Folder to store generated HTML files

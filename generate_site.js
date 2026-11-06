@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 
 const IMAGES_FOLDER = path.join(__dirname, 'dist/thumbs/'); // Folder containing images
 const OUTPUT_FOLDER = path.join(__dirname, 'dist/'); // Folder to store generated HTML files
