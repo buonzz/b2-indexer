@@ -2,13 +2,12 @@
 
 **Status:** Final — home-server baseline
 **Date:** 2026-11-06
-**Author:** Maintainers
 **Scope:** Architecture, decisions, duplicate handling, and phased delivery. No
 application code in this document.
 
 > **Revision note.** This replaces `aws-scale.md`. The project is finalized as a
-> **home-server-first** system: this home server runs indexing and serves the
-> app; B2 stays the system of record for bytes; local SQLite is the catalog.
+> **home-server-first** system: a home server runs indexing and serves the app;
+> B2 stays the system of record for bytes; local SQLite is the catalog.
 > There is no cloud control plane in scope. AWS is reduced to a short deferred
 > escape hatch (Appendix A) and is not part of the delivery plan.
 
@@ -42,7 +41,8 @@ Build a self-hosted Google Photos for a B2 bucket you already own:
 - **Home server** — indexer, `data/library.db` (SQLite + FTS5), Node API.
 - **Caddy** — HTTPS, SPA, reverse proxy, basic auth. Replaces CloudFront/API
   Gateway.
-- **Access** — LAN (`<lan-ip>`) and Tailscale (`<overlay-ip>`).
+- **Access** — the local network and a private overlay network (for example,
+  Tailscale).
 - **Duplicates** — exact SHA-1 detection is always on; perceptual near-dupes are
   opt-in; purging is report → approve → hide → retention → delete, never
   automatic.
@@ -93,8 +93,9 @@ depends on it.
 
 - B2 is the system of record for bytes. Do not duplicate originals into S3 or
   onto the home disk.
-- Home server: single machine (a modest SSD), behind
-  double NAT, LAN `<lan-ip>`, Tailscale `<overlay-ip>`.
+- Home server: a single always-on machine with a modest SSD, usually behind
+  double NAT and reachable over the LAN or a private overlay network such as
+  Tailscale.
 - Existing repo is CommonJS Node.js with a CLI pipeline and `dist/` output.
   Node >= 20.9.0.
 - `ffmpeg` is available; `sharp` is already a dependency.
@@ -185,11 +186,11 @@ B2 native download-by-id, `EXCLUDE_PATHS`.
  │    /api/timeline /api/search /api/albums              │                 │
  │    /api/items/:id/stream → 302 presigned B2 URL ──────┘                 │
  │                                                       │                 │
- │  Caddy :443  photos.internal                        │                 │
+ │  Caddy :443  photos.internal                          │                 │
  │    /      → file_server  dist/ (SPA + thumbs/)        │                 │
  │    /api/* → reverse_proxy localhost:8090              │                 │
  └───────────┬───────────────────────────────────────────┘                 │
-             │ LAN <lan-ip>  /  Tailscale <overlay-ip>                  │
+             │ LAN or private overlay network                               │
              ▼                                                               │
         Browser (desktop + phone) ──── fetch thumbnails from Caddy           │
                                     └ fetch originals directly from B2 ─────┘
@@ -217,7 +218,7 @@ B2 native download-by-id, `EXCLUDE_PATHS`.
     purge job. Never loaded by the API or the indexer.
 - Private bucket. No public ACLs; presigned URLs only.
 - Thumbnails are regenerable, so local-only storage is valid. At 10M items the
-  set is ~600 GB, which will not fit beside everything else on the local SSD;
+  set is ~600 GB, which may not fit beside everything else on the local SSD;
   mirroring is a disk-budget decision, not a default.
 
 ### 3.4 Ingestion: polling reconciliation
@@ -306,8 +307,8 @@ writer (the indexer). Full schema in §5.
 
 ### 3.7 Serving: Caddy + Node API
 
-Caddy already runs on this host with internal TLS and split-DNS hostnames. Add
-one site block:
+Caddy (or another HTTPS reverse proxy) can provide internal TLS and split-DNS
+hostnames. Add one site block:
 
 ```caddyfile
 photos.internal {
@@ -329,9 +330,8 @@ photos.internal {
 }
 ```
 
-- dnsmasq entry in `the local DNS configuration`, following the existing
-  convention (map to `<overlay-ip>` for Tailscale; LAN clients can use
-  `<lan-ip>`).
+- Add a local DNS entry for the chosen hostname (for example via dnsmasq or the
+  router), pointing at the server's LAN or overlay address.
 - The API is one Node process with `better-sqlite3` (synchronous, one query per
   request, no pool). Read endpoints:
 
